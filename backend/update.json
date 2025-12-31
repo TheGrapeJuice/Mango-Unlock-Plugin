@@ -1,8 +1,9 @@
 {
     "github": {
         "owner": "TheGrapeJuice",
-        "repo": "Mango-Unlock-Plugin",
+        "repo": "mangoplugin",
         "asset_name": "MangoUnlock.zip",
         "tag_prefix": "v"
     }
 }
+
