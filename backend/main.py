@@ -18,6 +18,8 @@ import zipfile
 import subprocess
 import base64
 import webbrowser
+from urllib.parse import quote
+from difflib import SequenceMatcher
 if sys.platform.startswith('win'):
 	try:
 		import winreg                
@@ -79,6 +81,30 @@ UPDATE_CHECK_INTERVAL_SECONDS = 2 * 60 * 60  # 2 hours
 UPDATE_CHECK_THREAD = None
 LAST_UPDATE_MESSAGE = None
 LAST_UPDATE_MESSAGE_LOCK = threading.Lock()
+PENDING_UPDATE_INFO = None  # Stores {'version': ..., 'zip_url': ...} when update is available
+PENDING_UPDATE_INFO_LOCK = threading.Lock()
+UPDATE_DISMISSED = False  # Track if user dismissed update this session
+UPDATE_DISMISSED_LOCK = threading.Lock()
+
+# ==================== MULTIPLAYER FIX CONFIGURATION ====================
+MULTIPLAYER_CONFIG_FILE = 'multiplayer.json'
+MULTIPLAYER_CACHE = {}  # Cache for multiplayer check results
+MULTIPLAYER_CACHE_LOCK = threading.Lock()
+MULTIPLAYER_CACHE_TTL = 30 * 60  # 30 minutes
+MULTIPLAYER_FIX_STATE = {}  # Track ongoing multiplayer fix operations
+MULTIPLAYER_FIX_STATE_LOCK = threading.Lock()
+
+# Steam API multiplayer category IDs
+MULTIPLAYER_CATEGORY_IDS = {
+    1,   # Multi-player
+    9,   # Co-op
+    27,  # Cross-Platform Multiplayer
+    36,  # Online PvP
+    37,  # Shared/Split Screen PvP
+    38,  # Online Co-op
+    39,  # Shared/Split Screen Co-op
+    49,  # PvP
+}
 
 class Logger:
     @staticmethod
@@ -266,8 +292,27 @@ def _apply_pending_update_if_any() -> str:
         logger.warn(f'AutoUpdate: Failed to apply pending update: {exc}')
         return ''
 
+def _store_pending_update_info(version: str, zip_url: str) -> None:
+    """Store pending update info for when user confirms."""
+    global PENDING_UPDATE_INFO
+    with PENDING_UPDATE_INFO_LOCK:
+        PENDING_UPDATE_INFO = {'version': version, 'zip_url': zip_url}
+
+def _get_pending_update_info() -> dict:
+    """Get and clear pending update info."""
+    global PENDING_UPDATE_INFO
+    with PENDING_UPDATE_INFO_LOCK:
+        info = PENDING_UPDATE_INFO
+        return info.copy() if info else {}
+
+def _clear_pending_update_info() -> None:
+    """Clear pending update info."""
+    global PENDING_UPDATE_INFO
+    with PENDING_UPDATE_INFO_LOCK:
+        PENDING_UPDATE_INFO = None
+
 def _check_for_update_once() -> str:
-    """Check for updates and download if available. Returns a message for the user."""
+    """Check for updates (does NOT download). Returns a message for the user if update available."""
     backend_dir = os.path.join(GetPluginDir(), 'backend')
     cfg_path = os.path.join(backend_dir, UPDATE_CONFIG_FILE)
     cfg = _read_json(cfg_path)
@@ -293,13 +338,32 @@ def _check_for_update_once() -> str:
         logger.log(f'AutoUpdate: Up-to-date (current {current_version}, latest {latest_version})')
         return ''
     
+    # Store the update info for when user confirms
+    _store_pending_update_info(latest_version, zip_url)
+    logger.log(f'AutoUpdate: Update available (current {current_version}, latest {latest_version})')
+    return f'MangoUnlock {latest_version} is available. Would you like to update now?'
+
+def _download_and_apply_update() -> dict:
+    """Download and apply the pending update. Called when user confirms."""
+    info = _get_pending_update_info()
+    if not info:
+        return {'success': False, 'error': 'No pending update'}
+    
+    version = info.get('version', '')
+    zip_url = info.get('zip_url', '')
+    
+    if not version or not zip_url:
+        return {'success': False, 'error': 'Invalid update info'}
+    
+    backend_dir = os.path.join(GetPluginDir(), 'backend')
     pending_zip = os.path.join(backend_dir, UPDATE_PENDING_ZIP)
-    pending_info = os.path.join(backend_dir, UPDATE_PENDING_INFO)
+    
+    logger.log(f'AutoUpdate: User confirmed, downloading update {version}...')
     
     if not _download_and_extract_update(zip_url, pending_zip):
-        return ''
+        return {'success': False, 'error': 'Failed to download update'}
     
-    # Attempt to extract immediately
+    # Extract the update
     try:
         with zipfile.ZipFile(pending_zip, 'r') as archive:
             archive.extractall(GetPluginDir())
@@ -307,13 +371,24 @@ def _check_for_update_once() -> str:
             os.remove(pending_zip)
         except Exception:
             pass
-        logger.log('AutoUpdate: Update extracted; will take effect after restart')
-        return f'MangoUnlock updated to {latest_version}. Please restart Steam to apply.'
+        _clear_pending_update_info()
+        logger.log(f'AutoUpdate: Update {version} extracted successfully')
+        return {'success': True, 'version': version, 'message': f'Updated to {version}. Restarting Steam...'}
     except Exception as extract_err:
-        logger.warn(f'AutoUpdate: Extraction failed, will apply on next start: {extract_err}')
-        _write_json(pending_info, {'version': latest_version, 'zip_url': zip_url})
-        logger.log('AutoUpdate: Update downloaded and queued for apply on next start')
-        return f'Update {latest_version} downloaded. Restart Steam to apply.'
+        logger.warn(f'AutoUpdate: Extraction failed: {extract_err}')
+        # Save for next startup
+        pending_info = os.path.join(backend_dir, UPDATE_PENDING_INFO)
+        _write_json(pending_info, {'version': version, 'zip_url': zip_url})
+        return {'success': False, 'error': f'Extraction failed: {extract_err}'}
+
+def DownloadAndApplyUpdate(contentScriptQuery: str = '') -> str:
+    """Frontend calls this when user clicks Update Now."""
+    try:
+        result = _download_and_apply_update()
+        return json.dumps(result)
+    except Exception as exc:
+        logger.warn(f'AutoUpdate: DownloadAndApplyUpdate failed: {exc}')
+        return json.dumps({'success': False, 'error': str(exc)})
 
 def _periodic_update_check_worker():
     """Background worker that periodically checks for updates."""
@@ -360,6 +435,10 @@ def _start_auto_update_background_check() -> None:
 
 def CheckForUpdatesNow(contentScriptQuery: str = '') -> str:
     """Expose a synchronous update check for the frontend."""
+    # If user already dismissed, don't return update message
+    with UPDATE_DISMISSED_LOCK:
+        if UPDATE_DISMISSED:
+            return json.dumps({'success': True, 'message': '', 'dismissed': True})
     try:
         message = _check_for_update_once()
         if message:
@@ -371,13 +450,595 @@ def CheckForUpdatesNow(contentScriptQuery: str = '') -> str:
 
 def GetUpdateMessage(contentScriptQuery: str = '') -> str:
     """Get any pending update message for the frontend."""
+    # If user already dismissed, don't return update message
+    with UPDATE_DISMISSED_LOCK:
+        if UPDATE_DISMISSED:
+            return json.dumps({'success': True, 'message': '', 'dismissed': True})
     try:
         message = _get_last_message()
         return json.dumps({'success': True, 'message': message})
     except Exception as exc:
         return json.dumps({'success': False, 'error': str(exc)})
 
+def DismissUpdate(contentScriptQuery: str = '') -> str:
+    """Called when user clicks 'Later' - prevents further prompts this session."""
+    global UPDATE_DISMISSED
+    with UPDATE_DISMISSED_LOCK:
+        UPDATE_DISMISSED = True
+    logger.log('AutoUpdate: User dismissed update, will not prompt again this session')
+    return json.dumps({'success': True})
+
+def IsUpdateDismissed(contentScriptQuery: str = '') -> str:
+    """Check if user has dismissed update this session."""
+    with UPDATE_DISMISSED_LOCK:
+        return json.dumps({'success': True, 'dismissed': UPDATE_DISMISSED})
+
 # ==================== END AUTO-UPDATE FUNCTIONS ====================
+
+# ==================== MULTIPLAYER FIX FUNCTIONS ====================
+
+def _get_multiplayer_config() -> dict:
+    """Read multiplayer config (online-fix.me credentials)."""
+    cfg_path = os.path.join(GetPluginDir(), 'backend', MULTIPLAYER_CONFIG_FILE)
+    return _read_json(cfg_path)
+
+def _save_multiplayer_config(config: dict) -> bool:
+    """Save multiplayer config."""
+    cfg_path = os.path.join(GetPluginDir(), 'backend', MULTIPLAYER_CONFIG_FILE)
+    return _write_json(cfg_path, config)
+
+def _get_multiplayer_cache_entry(appid: int):
+    """Get cached multiplayer check result."""
+    now = time.time()
+    with MULTIPLAYER_CACHE_LOCK:
+        entry = MULTIPLAYER_CACHE.get(appid)
+        if not entry:
+            return None
+        if now - entry.get('timestamp', 0) > MULTIPLAYER_CACHE_TTL:
+            MULTIPLAYER_CACHE.pop(appid, None)
+            return None
+        return entry.get('has_multiplayer')
+
+def _set_multiplayer_cache_entry(appid: int, has_multiplayer: bool) -> None:
+    """Cache multiplayer check result."""
+    with MULTIPLAYER_CACHE_LOCK:
+        MULTIPLAYER_CACHE[appid] = {
+            'timestamp': time.time(),
+            'has_multiplayer': has_multiplayer,
+        }
+
+def _check_game_has_multiplayer(appid: int) -> bool:
+    """Check if a game has multiplayer via Steam API."""
+    # Check cache first
+    cached = _get_multiplayer_cache_entry(appid)
+    if cached is not None:
+        return cached
+    
+    _ensure_http_client()
+    try:
+        url = f"https://store.steampowered.com/api/appdetails?appids={appid}"
+        resp = HTTP_CLIENT.get(url, follow_redirects=True, timeout=15, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        resp.raise_for_status()
+        data = resp.json()
+        
+        entry = data.get(str(appid)) or data.get(int(appid)) or {}
+        if not isinstance(entry, dict) or not entry.get('success'):
+            # Assume true on failure/missing data
+            _set_multiplayer_cache_entry(appid, True)
+            return True
+        
+        inner = entry.get('data') or {}
+        categories = inner.get('categories', [])
+        
+        for cat in categories:
+            cat_id = cat.get('id')
+            if cat_id in MULTIPLAYER_CATEGORY_IDS:
+                logger.log(f'Multiplayer: Game {appid} has multiplayer (category {cat_id})')
+                _set_multiplayer_cache_entry(appid, True)
+                return True
+        
+        logger.log(f'Multiplayer: Game {appid} does NOT have multiplayer')
+        _set_multiplayer_cache_entry(appid, False)
+        return False
+    except Exception as e:
+        logger.warn(f'Multiplayer: Failed to check multiplayer for {appid}: {e}')
+        # Assume true on error
+        _set_multiplayer_cache_entry(appid, True)
+        return True
+
+def _set_multiplayer_fix_state(appid: int, update: dict) -> None:
+    """Update multiplayer fix progress state."""
+    with MULTIPLAYER_FIX_STATE_LOCK:
+        state = MULTIPLAYER_FIX_STATE.get(appid) or {}
+        state.update(update)
+        MULTIPLAYER_FIX_STATE[appid] = state
+
+def _get_multiplayer_fix_state(appid: int) -> dict:
+    """Get multiplayer fix progress state."""
+    with MULTIPLAYER_FIX_STATE_LOCK:
+        return MULTIPLAYER_FIX_STATE.get(appid, {}).copy()
+
+def _find_steam_game_folders() -> list:
+    """Find all Steam library game folders."""
+    steam_paths = []
+    found = set()
+    
+    # Check common Steam paths
+    for path in [r"C:\Program Files (x86)\Steam\steamapps\common", r"C:\Program Files\Steam\steamapps\common"]:
+        if os.path.exists(path) and path not in found:
+            steam_paths.append(path)
+            found.add(path)
+    
+    # Check all drives for SteamLibrary/Steam folders
+    for letter in range(ord('A'), ord('Z') + 1):
+        drive = f"{chr(letter)}:\\"
+        if os.path.exists(drive):
+            for sub in ["SteamLibrary", "Steam"]:
+                common_path = os.path.join(drive, sub, "steamapps", "common")
+                if os.path.exists(common_path) and common_path not in found:
+                    steam_paths.append(common_path)
+                    found.add(common_path)
+    
+    return steam_paths
+
+def _find_game_folder_by_name(game_name: str, steam_paths: list) -> str:
+    """Find game folder by name."""
+    norm = re.sub(r'[^a-zA-Z0-9\s]', '', game_name).lower().strip()
+    
+    # First pass - exact match
+    for path in steam_paths:
+        try:
+            for folder in os.listdir(path):
+                folder_norm = re.sub(r'[^a-zA-Z0-9\s]', '', folder).lower().strip()
+                if folder_norm == norm:
+                    return os.path.join(path, folder)
+        except Exception:
+            pass
+    
+    # Second pass - fuzzy match
+    for path in steam_paths:
+        try:
+            for folder in os.listdir(path):
+                folder_norm = re.sub(r'[^a-zA-Z0-9\s]', '', folder).lower().strip()
+                if norm in folder_norm or folder_norm in norm:
+                    return os.path.join(path, folder)
+        except Exception:
+            pass
+    
+    return ''
+
+def _find_game_folder_by_appid(app_id: str, steam_paths: list) -> str:
+    """Find game folder by app ID via manifest files."""
+    if not app_id:
+        return ''
+    
+    for common in steam_paths:
+        lib = os.path.dirname(common)  # steamapps folder
+        try:
+            for f in os.listdir(lib):
+                if f.startswith('appmanifest_') and f.endswith('.acf'):
+                    manifest_path = os.path.join(lib, f)
+                    try:
+                        with open(manifest_path, 'r', encoding='utf-8', errors='ignore') as mf:
+                            content = mf.read()
+                            if f'"appid"\t\t"{app_id}"' in content or f'"appid"		"{app_id}"' in content:
+                                # Extract installdir
+                                match = re.search(r'"installdir"\s+"([^"]+)"', content)
+                                if match:
+                                    install_dir = match.group(1)
+                                    full_path = os.path.join(common, install_dir)
+                                    if os.path.exists(full_path):
+                                        return full_path
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    
+    return ''
+
+def _detect_archiver() -> tuple:
+    """Detect available archiver (WinRAR or 7-Zip)."""
+    import shutil as sh
+    
+    # Check WinRAR
+    for p in [sh.which("winrar"), r"C:\Program Files\WinRAR\winrar.exe", r"C:\Program Files (x86)\WinRAR\winrar.exe"]:
+        if p and os.path.exists(p):
+            return ("winrar", p)
+    
+    # Check 7-Zip
+    for p in [sh.which("7z"), r"C:\Program Files\7-Zip\7z.exe", r"C:\Program Files (x86)\7-Zip\7z.exe"]:
+        if p and os.path.exists(p):
+            return ("7z", p)
+    
+    return (None, None)
+
+def _extract_archive(archive: str, target: str, atype: str, apath: str, pwd: str = "online-fix.me") -> bool:
+    """Extract archive using WinRAR or 7-Zip."""
+    if atype == "winrar":
+        cmd = [apath, "x", f"-p{pwd}", "-y", archive, target + os.sep]
+    else:
+        cmd = [apath, "x", f"-p{pwd}", "-y", f"-o{target}", archive]
+    
+    try:
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        result = subprocess.run(cmd, check=True, capture_output=True, timeout=300, 
+                                startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW)
+        return True
+    except Exception as e:
+        logger.warn(f'Multiplayer: Archive extraction failed: {e}')
+        return False
+
+def _wait_for_download(folder: str, max_wait: int = 600) -> str:
+    """Wait for download to complete in folder."""
+    start = time.time()
+    exts = (".rar", ".zip", ".7z")
+    sizes = {}
+    stable = {}
+    
+    while (time.time() - start) < max_wait:
+        try:
+            for f in os.listdir(folder):
+                full_path = os.path.join(folder, f)
+                if not os.path.isfile(full_path):
+                    continue
+                lower = f.lower()
+                if any(lower.endswith(ext) for ext in exts):
+                    try:
+                        size = os.path.getsize(full_path)
+                        if f in sizes and sizes[f] == size:
+                            stable[f] = stable.get(f, 0) + 1
+                            if stable[f] >= 3:  # Stable for 9+ seconds
+                                return full_path
+                        else:
+                            stable[f] = 0
+                        sizes[f] = size
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        time.sleep(3)
+    
+    return ''
+
+def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, password: str) -> None:
+    """Run the multiplayer fix download and extraction process."""
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.common.keys import Keys
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.common.exceptions import TimeoutException
+    except ImportError as e:
+        _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'Selenium not installed. Please install selenium package.'})
+        logger.error(f'Multiplayer: Selenium import failed: {e}')
+        return
+    
+    driver = None
+    temp = os.path.join(tempfile.gettempdir(), "MangoMultiplayer", "dl")
+    os.makedirs(temp, exist_ok=True)
+    
+    # Clean temp folder
+    for f in os.listdir(temp):
+        try:
+            os.remove(os.path.join(temp, f))
+        except Exception:
+            pass
+    
+    try:
+        _set_multiplayer_fix_state(appid, {'status': 'starting', 'message': 'Initializing...'})
+        
+        if not username or not password:
+            _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'No credentials configured'})
+            return
+        
+        if not game_name:
+            _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'Game name not found'})
+            return
+        
+        game_name = game_name.strip()
+        clean = re.sub(r'[^\w\s]', '', game_name)
+        url = f"https://online-fix.me/index.php?do=search&subaction=search&story={quote(clean)}"
+        
+        _set_multiplayer_fix_state(appid, {'status': 'starting', 'message': 'Setting up browser...'})
+        
+        opts = Options()
+        opts.add_argument("--window-size=1280,800")
+        opts.add_argument("--mute-audio")
+        opts.add_argument("--headless")
+        opts.add_argument("--log-level=3")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--no-sandbox")
+        opts.add_experimental_option("prefs", {
+            "download.default_directory": os.path.abspath(temp),
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "safebrowsing.enabled": True
+        })
+        
+        try:
+            driver = webdriver.Chrome(service=Service(log_path=os.devnull), options=opts)
+        except Exception as e:
+            _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': f'Chrome driver error: {str(e)[:100]}'})
+            logger.error(f'Multiplayer: WebDriver failed: {e}')
+            return
+        
+        wait = WebDriverWait(driver, 15)
+        
+        _set_multiplayer_fix_state(appid, {'status': 'searching', 'message': 'Searching for fix...'})
+        driver.get(url)
+        wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "a")))
+        
+        _set_multiplayer_fix_state(appid, {'status': 'searching', 'message': 'Finding best match...'})
+        anchors = driver.find_elements(By.TAG_NAME, "a")
+        if not anchors:
+            _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'No search results found'})
+            return
+        
+        game_lower = game_name.lower()
+        best = None
+        best_r = 0.0
+        
+        for a in anchors:
+            try:
+                href = a.get_attribute("href") or ""
+                txt = (a.text or "").strip().lower()
+                if not href or "online-fix.me" not in href or "/page/" in href:
+                    continue
+                if "/games/" not in href and "/engine/" not in href:
+                    continue
+                ratio = SequenceMatcher(None, game_lower, txt).ratio()
+                if ratio > best_r:
+                    best_r = ratio
+                    best = a
+            except Exception:
+                pass
+        
+        if not best or best_r < 0.2:
+            _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': f'No suitable match found for "{game_name}"'})
+            return
+        
+        _set_multiplayer_fix_state(appid, {'status': 'logging_in', 'message': 'Logging in...'})
+        driver.execute_script("arguments[0].scrollIntoView(true);", best)
+        driver.execute_script("arguments[0].click();", best)
+        
+        try:
+            wait.until(EC.presence_of_element_located((By.NAME, "login_name")))
+            wait.until(EC.presence_of_element_located((By.NAME, "login_password")))
+        except TimeoutException:
+            _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'Login form not found'})
+            return
+        
+        ln = driver.find_element(By.NAME, "login_name")
+        lp = driver.find_element(By.NAME, "login_password")
+        ln.clear()
+        ln.send_keys(username)
+        lp.clear()
+        lp.send_keys(password)
+        
+        try:
+            btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@value='Вход'] | //button[contains(text(),'Вход')]")))
+            driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+            driver.execute_script("arguments[0].click();", btn)
+        except TimeoutException:
+            lp.send_keys(Keys.ENTER)
+        
+        _set_multiplayer_fix_state(appid, {'status': 'finding_download', 'message': 'Finding download link...'})
+        
+        download_xpath = "//a[contains(text(),'Скачать фикс с сервера')] | //button[contains(text(),'Скачать фикс с сервера')]"
+        # Use a shorter 10-second timeout for finding download link after login
+        # If login failed, this will timeout quickly and show login_required
+        short_wait = WebDriverWait(driver, 10)
+        try:
+            short_wait.until(EC.presence_of_element_located((By.XPATH, download_xpath)))
+        except TimeoutException:
+            _set_multiplayer_fix_state(appid, {'status': 'login_required', 'error': 'Login required - please enter credentials'})
+            return
+        
+        btns = driver.find_elements(By.XPATH, download_xpath)
+        if not btns:
+            btns = driver.find_elements(By.XPATH, "//a[contains(text(),'Download the fix')] | //button[contains(text(),'Download the fix')]")
+        
+        if not btns:
+            _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'Download button not found'})
+            return
+        
+        dl_btn = btns[0]
+        _set_multiplayer_fix_state(appid, {'status': 'downloading', 'message': 'Starting download...'})
+        driver.execute_script("arguments[0].scrollIntoView(true);", dl_btn)
+        driver.execute_script("arguments[0].click();", dl_btn)
+        
+        # Wait for new tab
+        try:
+            wait.until(lambda d: len(d.window_handles) > 1)
+        except TimeoutException:
+            pass
+        
+        # Switch to uploads tab if opened
+        for h in driver.window_handles:
+            driver.switch_to.window(h)
+            if "uploads.online-fix.me" in driver.current_url.lower():
+                break
+        
+        # Look for Fix Repair link
+        try:
+            wait.until(EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, "Fix Repair")))
+        except TimeoutException:
+            pass
+        
+        fix_links = driver.find_elements(By.PARTIAL_LINK_TEXT, "Fix Repair")
+        if fix_links:
+            try:
+                driver.execute_script("arguments[0].scrollIntoView(true);", fix_links[0])
+                driver.execute_script("arguments[0].click();", fix_links[0])
+                time.sleep(2)
+            except Exception:
+                pass
+            
+            # Find and click actual download link
+            all_links = driver.find_elements(By.TAG_NAME, "a")
+            for lnk in all_links:
+                href = lnk.get_attribute("href") or ""
+                if "uploads.online-fix.me" in href and any(ext in href.lower() for ext in [".rar", ".zip", ".7z"]):
+                    try:
+                        driver.execute_script("arguments[0].click();", lnk)
+                        break
+                    except Exception:
+                        pass
+        
+        _set_multiplayer_fix_state(appid, {'status': 'downloading', 'message': 'Waiting for download...'})
+        dl = _wait_for_download(temp, max_wait=600)
+        
+        if not dl:
+            _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'Download timeout'})
+            return
+        
+        _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': 'Extracting fix...'})
+        
+        # Find game folder
+        steam_paths = _find_steam_game_folders()
+        if not steam_paths:
+            _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'No Steam library found'})
+            return
+        
+        gf = _find_game_folder_by_appid(str(appid), steam_paths)
+        if not gf:
+            gf = _find_game_folder_by_name(game_name, steam_paths)
+        
+        if not gf:
+            _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': f'Game folder not found for {game_name}'})
+            return
+        
+        atype, apath = _detect_archiver()
+        if not atype:
+            _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'No archiver found (need WinRAR or 7-Zip)'})
+            return
+        
+        if not _extract_archive(dl, gf, atype, apath):
+            _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'Extraction failed'})
+            return
+        
+        # Cleanup
+        try:
+            os.remove(dl)
+        except Exception:
+            pass
+        
+        _set_multiplayer_fix_state(appid, {
+            'status': 'done',
+            'success': True,
+            'message': f'Fix installed to {gf}'
+        })
+        logger.log(f'Multiplayer: Fix installed for {game_name} ({appid}) to {gf}')
+        
+    except Exception as e:
+        logger.error(f'Multiplayer: Fix process failed for {appid}: {e}')
+        _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': str(e)[:150]})
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        # Cleanup temp folder
+        try:
+            temp_parent = os.path.join(tempfile.gettempdir(), "MangoMultiplayer")
+            if os.path.exists(temp_parent):
+                shutil.rmtree(temp_parent, ignore_errors=True)
+        except Exception:
+            pass
+
+# ===== Multiplayer Fix Frontend API Functions =====
+
+def CheckGameHasMultiplayer(appid: int, contentScriptQuery: str = '') -> str:
+    """Check if a game has multiplayer (called from frontend)."""
+    try:
+        appid = int(appid)
+    except Exception:
+        return json.dumps({'success': False, 'error': 'Invalid appid'})
+    
+    has_mp = _check_game_has_multiplayer(appid)
+    return json.dumps({'success': True, 'has_multiplayer': has_mp})
+
+def GetMultiplayerCredentials(contentScriptQuery: str = '') -> str:
+    """Get multiplayer credentials (without password)."""
+    config = _get_multiplayer_config()
+    has_creds = bool(config.get('username')) and bool(config.get('password'))
+    return json.dumps({
+        'success': True,
+        'has_credentials': has_creds,
+        'username': config.get('username', '')
+    })
+
+def SaveMultiplayerCredentials(username: str, password: str, contentScriptQuery: str = '') -> str:
+    """Save multiplayer credentials."""
+    try:
+        username = str(username or '').strip()
+        password = str(password or '').strip()
+        
+        if not username or not password:
+            return json.dumps({'success': False, 'error': 'Username and password required'})
+        
+        config = _get_multiplayer_config()
+        config['username'] = username
+        config['password'] = password
+        
+        if _save_multiplayer_config(config):
+            logger.log('Multiplayer: Credentials saved')
+            return json.dumps({'success': True})
+        else:
+            return json.dumps({'success': False, 'error': 'Failed to save config'})
+    except Exception as e:
+        return json.dumps({'success': False, 'error': str(e)})
+
+def StartMultiplayerFix(appid: int, contentScriptQuery: str = '') -> str:
+    """Start the multiplayer fix process for a game."""
+    try:
+        appid = int(appid)
+    except Exception:
+        return json.dumps({'success': False, 'error': 'Invalid appid'})
+    
+    # Get credentials
+    config = _get_multiplayer_config()
+    username = config.get('username', '')
+    password = config.get('password', '')
+    
+    if not username or not password:
+        return json.dumps({'success': False, 'error': 'No credentials configured', 'need_credentials': True})
+    
+    # Get game name
+    game_name = _fetch_app_name(appid) or f'Game {appid}'
+    
+    # Start fix in background thread
+    _set_multiplayer_fix_state(appid, {'status': 'queued', 'message': 'Starting...'})
+    
+    t = threading.Thread(
+        target=_run_multiplayer_fix_process,
+        args=(appid, game_name, username, password),
+        daemon=True
+    )
+    t.start()
+    
+    logger.log(f'Multiplayer: Started fix process for {game_name} ({appid})')
+    return json.dumps({'success': True, 'game_name': game_name})
+
+def GetMultiplayerFixStatus(appid: int, contentScriptQuery: str = '') -> str:
+    """Get the current status of a multiplayer fix operation."""
+    try:
+        appid = int(appid)
+    except Exception:
+        return json.dumps({'success': False, 'error': 'Invalid appid'})
+    
+    state = _get_multiplayer_fix_state(appid)
+    return json.dumps({'success': True, 'state': state})
+
+# ==================== END MULTIPLAYER FIX FUNCTIONS ====================
                                                     
 
 def detect_steam_install_path() -> str:

@@ -5,6 +5,7 @@
     let buttonInserted = false;
     let pollingTimer = null;
     let lastAppId = null;
+    // Update dismissal is now tracked on backend to persist across page navigations
 
     function backendCall(method, payload) {
         return new Promise((resolve, reject) => {
@@ -50,7 +51,8 @@
 .MangoUnlock-restart-button,
 .MangoUnlock-button,
 .MangoUnlock-remove-button,
-.MangoUnlock-unavailable{
+.MangoUnlock-unavailable,
+.MangoUnlock-multiplayer-button{
     margin-left:6px !important;
 }
 .MangoUnlock-unavailable,
@@ -62,6 +64,33 @@
     pointer-events:none !important;
     opacity:0.6 !important;
     cursor:default !important;
+}
+.MangoUnlock-multiplayer-button{
+    background: linear-gradient(to bottom, #5ba32b 0%, #4a8f24 50%, #3d7a1d 100%) !important;
+}
+.MangoUnlock-multiplayer-button:hover{
+    background: linear-gradient(to bottom, #6cb93c 0%, #5ba32b 50%, #4a8f24 100%) !important;
+}
+.MangoUnlock-input{
+    background-color: #233748 !important;
+    border: 1px solid #3d6889 !important;
+    border-radius: 2px !important;
+    padding: 8px 10px !important;
+    color: #ffffff !important;
+    font-size: 13px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+    margin-top: 4px !important;
+}
+.MangoUnlock-input:focus{
+    border-color: #66c0f4 !important;
+    outline: none !important;
+}
+.MangoUnlock-label{
+    display: block !important;
+    margin-bottom: 12px !important;
+    color: #c7d5e0 !important;
+    font-size: 13px !important;
 }`;
         document.head.appendChild(style);
     }
@@ -159,6 +188,61 @@
         return overlay;
     }
 
+    function showUpdateConfirmModal(titleText, bodyText, onConfirm, onCancel) {
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:100000;display:flex;align-items:center;justify-content:center;';
+        overlay.className = 'MangoUnlock-update-overlay';
+
+        const modal = document.createElement('div');
+        modal.style.cssText = 'background:#1b2838;color:#fff;border:1px solid #2a475e;border-radius:4px;min-width:280px;max-width:420px;padding:18px 20px;box-shadow:0 8px 24px rgba(0,0,0,.6);';
+
+        const title = document.createElement('div');
+        title.style.cssText = 'font-size:16px;color:#66c0f4;margin-bottom:10px;font-weight:600;';
+        title.textContent = titleText;
+
+        const body = document.createElement('div');
+        body.style.cssText = 'font-size:14px;line-height:1.6;margin-bottom:16px;';
+        body.textContent = bodyText;
+
+        const btnRow = document.createElement('div');
+        btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;';
+        const updateBtn = createButton('Update Now');
+        const laterBtn = createButton('Later');
+
+        laterBtn.onclick = function(ev){
+            ev.preventDefault();
+            overlay.remove();
+            if (typeof onCancel === 'function') {
+                try {
+                    onCancel();
+                } catch (err) {
+                    console.warn('[MangoUnlock] Cancel action failed', err);
+                }
+            }
+        };
+        updateBtn.onclick = function(ev){
+            ev.preventDefault();
+            overlay.remove();
+            if (typeof onConfirm === 'function') {
+                try {
+                    onConfirm();
+                } catch (err) {
+                    console.warn('[MangoUnlock] Confirm action failed', err);
+                }
+            }
+        };
+
+        btnRow.appendChild(updateBtn);
+        btnRow.appendChild(laterBtn);
+
+        modal.appendChild(title);
+        modal.appendChild(body);
+        modal.appendChild(btnRow);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+        return overlay;
+    }
+
     function updateOverlay(overlayState, status) {
         if (!overlayState) return;
         const { body, bar, percent, progress } = overlayState;
@@ -200,6 +284,7 @@
             '.MangoUnlock-remove-button',
             '.MangoUnlock-restart-button',
             '.MangoUnlock-unavailable',
+            '.MangoUnlock-multiplayer-button',
         ];
         selectors.forEach((selector) => {
             container.querySelectorAll(selector).forEach((node) => node.remove());
@@ -297,13 +382,24 @@
         unavailableBtn.style.display = '';
         unavailableBtn.style.pointerEvents = 'none';
 
+        // Multiplayer Fix button - only shown for games added via MangoUnlock that have multiplayer
+        const mpFixBtn = createButton('🔧 Fix Multiplayer', referenceBtn, 'MangoUnlock-multiplayer-button');
+        mpFixBtn.dataset.appid = String(appid);
+        mpFixBtn.style.display = 'none';
+        mpFixBtn.onclick = function(e){
+            e.preventDefault();
+            startMultiplayerFix(appid, container);
+        };
+
         container.appendChild(restartBtn);
         container.appendChild(addBtn);
         container.appendChild(removeBtn);
         container.appendChild(unavailableBtn);
+        container.appendChild(mpFixBtn);
 
         const addSpan = addBtn.querySelector('span');
         const unavailableSpan = unavailableBtn.querySelector('span');
+        const mpFixSpan = mpFixBtn.querySelector('span');
         const state = {
             exists: null,
             available: null,
@@ -311,15 +407,21 @@
             repository: null,
             indeterminate: false,
             message: null,
+            hasMultiplayer: null,
         };
 
         function render() {
             addBtn.style.display = 'none';
             removeBtn.style.display = 'none';
             unavailableBtn.style.display = 'none';
+            mpFixBtn.style.display = 'none';
 
             if (state.exists === true) {
                 removeBtn.style.display = '';
+                // Show multiplayer fix button if game was added AND has multiplayer
+                if (state.hasMultiplayer === true) {
+                    mpFixBtn.style.display = '';
+                }
                 return;
             }
 
@@ -361,15 +463,32 @@
             state.repository = null;
             state.indeterminate = false;
             state.message = null;
+            state.hasMultiplayer = null;
             render();
 
-            // Pre-fetch DLCs for this app in the background so they're ready for download
-            backendCall('PrefetchDLCsForApp', { appid, contentScriptQuery: '' }).catch(() => {});
+            // DLCs are fetched on-demand when user clicks Add - no prefetching needed
 
             backendCall('HasMangoUnlockForApp', { appid, contentScriptQuery: '' }).then((res) => {
                 const payload = typeof res === 'string' ? JSON.parse(res) : res;
                 state.exists = !!(payload && payload.success && payload.exists);
                 render();
+                
+                // If game exists in MangoUnlock, check if it has multiplayer
+                if (state.exists) {
+                    backendCall('CheckGameHasMultiplayer', { appid: appid }).then((mpRes) => {
+                        try {
+                            const mpPayload = typeof mpRes === 'string' ? JSON.parse(mpRes) : mpRes;
+                            if (mpPayload && mpPayload.success) {
+                                state.hasMultiplayer = !!mpPayload.has_multiplayer;
+                                render();
+                            }
+                        } catch (err) {
+                            console.warn('[MangoUnlock] Multiplayer check parse error', err);
+                        }
+                    }).catch((err) => {
+                        console.warn('[MangoUnlock] Multiplayer check failed', err);
+                    });
+                }
             }).catch(() => {
                 state.exists = false;
                 render();
@@ -454,49 +573,98 @@
         if (updateCheckDone) return;
         updateCheckDone = true;
         
-        // First, check if there's a pending message from a previous update check
-        backendCall('GetUpdateMessage', {}).then(function(res) {
+        // First check if user already dismissed update this session (backend tracks this)
+        backendCall('IsUpdateDismissed', {}).then(function(res) {
             try {
                 const payload = typeof res === 'string' ? JSON.parse(res) : res;
-                if (payload && payload.success && payload.message) {
-                    const msg = String(payload.message);
-                    // Show update notification to user
-                    showUpdateNotification(msg);
+                if (payload && payload.dismissed) {
+                    console.log('[MangoUnlock] Update already dismissed this session');
                     return;
                 }
             } catch (err) {
-                console.warn('[MangoUnlock] GetUpdateMessage parse error', err);
+                console.warn('[MangoUnlock] IsUpdateDismissed parse error', err);
             }
             
-            // If no pending message, trigger a check now
-            backendCall('CheckForUpdatesNow', {}).then(function(res2) {
+            // Check if there's a pending message from a previous update check
+            backendCall('GetUpdateMessage', {}).then(function(res) {
                 try {
-                    const payload2 = typeof res2 === 'string' ? JSON.parse(res2) : res2;
-                    if (payload2 && payload2.success && payload2.message) {
-                        const msg2 = String(payload2.message);
-                        showUpdateNotification(msg2);
+                    const payload = typeof res === 'string' ? JSON.parse(res) : res;
+                    if (payload && payload.dismissed) {
+                        return; // Already dismissed
                     }
-                } catch (err2) {
-                    console.warn('[MangoUnlock] CheckForUpdatesNow parse error', err2);
+                    if (payload && payload.success && payload.message) {
+                        const msg = String(payload.message);
+                        showUpdateNotification(msg);
+                        return;
+                    }
+                } catch (err) {
+                    console.warn('[MangoUnlock] GetUpdateMessage parse error', err);
                 }
+                
+                // If no pending message, trigger a check now
+                backendCall('CheckForUpdatesNow', {}).then(function(res2) {
+                    try {
+                        const payload2 = typeof res2 === 'string' ? JSON.parse(res2) : res2;
+                        if (payload2 && payload2.dismissed) {
+                            return; // Already dismissed
+                        }
+                        if (payload2 && payload2.success && payload2.message) {
+                            const msg2 = String(payload2.message);
+                            showUpdateNotification(msg2);
+                        }
+                    } catch (err2) {
+                        console.warn('[MangoUnlock] CheckForUpdatesNow parse error', err2);
+                    }
+                }).catch(function(err) {
+                    console.warn('[MangoUnlock] CheckForUpdatesNow failed', err);
+                });
             }).catch(function(err) {
-                console.warn('[MangoUnlock] CheckForUpdatesNow failed', err);
+                console.warn('[MangoUnlock] GetUpdateMessage failed', err);
             });
         }).catch(function(err) {
-            console.warn('[MangoUnlock] GetUpdateMessage failed', err);
+            console.warn('[MangoUnlock] IsUpdateDismissed failed', err);
         });
     }
     
     function showUpdateNotification(message) {
         // Check if this is an update message
-        const isUpdateMsg = message.toLowerCase().includes('update') || message.toLowerCase().includes('restart');
+        const isUpdateMsg = message.toLowerCase().includes('update') || message.toLowerCase().includes('available');
         
         if (isUpdateMsg) {
             // Show confirm dialog with Update (restart) and Later options
-            showConfirmModal('MangoUnlock Update', message, function() {
-                // User clicked OK - restart Steam
-                backendCall('RestartSteam', {}).catch(function(err) {
-                    console.warn('[MangoUnlock] RestartSteam failed', err);
+            showUpdateConfirmModal('MangoUnlock Update', message, function() {
+                // User clicked Update Now - download, extract, then restart Steam
+                // Show a loading overlay while downloading
+                const loadingOverlay = showOverlay('Downloading update...');
+                
+                backendCall('DownloadAndApplyUpdate', {}).then(function(res) {
+                    try {
+                        const payload = typeof res === 'string' ? JSON.parse(res) : res;
+                        if (payload && payload.success) {
+                            loadingOverlay.body.textContent = 'Update installed! Restarting Steam...';
+                            // Now restart Steam
+                            setTimeout(function() {
+                                backendCall('RestartSteam', {}).catch(function(err) {
+                                    console.warn('[MangoUnlock] RestartSteam failed', err);
+                                    loadingOverlay.body.textContent = 'Update installed! Please restart Steam manually.';
+                                });
+                            }, 1000);
+                        } else {
+                            loadingOverlay.body.textContent = 'Update failed: ' + (payload.error || 'Unknown error');
+                        }
+                    } catch (err) {
+                        loadingOverlay.body.textContent = 'Update failed: ' + err.message;
+                    }
+                }).catch(function(err) {
+                    loadingOverlay.body.textContent = 'Update failed: ' + err.message;
+                    console.warn('[MangoUnlock] DownloadAndApplyUpdate failed', err);
+                });
+            }, function() {
+                // User clicked Later - tell backend to not prompt again this session
+                backendCall('DismissUpdate', {}).then(function() {
+                    console.log('[MangoUnlock] Update dismissed on backend, will not prompt again until Steam restart');
+                }).catch(function(err) {
+                    console.warn('[MangoUnlock] DismissUpdate failed', err);
                 });
             });
         } else {
@@ -507,10 +675,269 @@
     
     // ==================== END AUTO-UPDATE FUNCTIONS ====================
 
+    // ==================== MULTIPLAYER FIX FUNCTIONS ====================
+
+    function showCredentialsModal(onSave) {
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:100000;display:flex;align-items:center;justify-content:center;';
+        overlay.className = 'MangoUnlock-credentials-overlay';
+
+        const modal = document.createElement('div');
+        modal.style.cssText = 'background:#1b2838;color:#fff;border:1px solid #2a475e;border-radius:4px;min-width:340px;max-width:420px;padding:18px 20px;box-shadow:0 8px 24px rgba(0,0,0,.6);';
+
+        const title = document.createElement('div');
+        title.style.cssText = 'font-size:16px;color:#66c0f4;margin-bottom:10px;font-weight:600;';
+        title.textContent = 'Online-Fix.me Credentials';
+
+        const info = document.createElement('div');
+        info.style.cssText = 'font-size:12px;color:#8f98a0;margin-bottom:16px;';
+        info.innerHTML = 'Enter your <a href="https://online-fix.me/" target="_blank" style="color:#66c0f4;">online-fix.me</a> account credentials to download multiplayer fixes.';
+
+        const usernameLabel = document.createElement('label');
+        usernameLabel.className = 'MangoUnlock-label';
+        usernameLabel.textContent = 'Username:';
+        const usernameInput = document.createElement('input');
+        usernameInput.type = 'text';
+        usernameInput.className = 'MangoUnlock-input';
+        usernameInput.placeholder = 'Enter username';
+        usernameLabel.appendChild(usernameInput);
+
+        const passwordLabel = document.createElement('label');
+        passwordLabel.className = 'MangoUnlock-label';
+        passwordLabel.textContent = 'Password:';
+        const passwordInput = document.createElement('input');
+        passwordInput.type = 'password';
+        passwordInput.className = 'MangoUnlock-input';
+        passwordInput.placeholder = 'Enter password';
+        passwordLabel.appendChild(passwordInput);
+
+        const btnRow = document.createElement('div');
+        btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:16px;';
+        const saveBtn = createButton('Save');
+        const cancelBtn = createButton('Cancel');
+
+        cancelBtn.onclick = function(ev){
+            ev.preventDefault();
+            overlay.remove();
+        };
+        saveBtn.onclick = function(ev){
+            ev.preventDefault();
+            const username = usernameInput.value.trim();
+            const password = passwordInput.value.trim();
+            if (!username || !password) {
+                info.style.color = '#c94a4a';
+                info.textContent = 'Please enter both username and password.';
+                return;
+            }
+            // Save credentials via backend
+            backendCall('SaveMultiplayerCredentials', { username: username, password: password }).then(function(res) {
+                try {
+                    const payload = typeof res === 'string' ? JSON.parse(res) : res;
+                    if (payload && payload.success) {
+                        overlay.remove();
+                        if (typeof onSave === 'function') {
+                            onSave();
+                        }
+                    } else {
+                        info.style.color = '#c94a4a';
+                        info.textContent = 'Failed to save: ' + (payload.error || 'Unknown error');
+                    }
+                } catch (err) {
+                    info.style.color = '#c94a4a';
+                    info.textContent = 'Failed to save credentials.';
+                }
+            }).catch(function(err) {
+                info.style.color = '#c94a4a';
+                info.textContent = 'Failed to save credentials.';
+            });
+        };
+
+        btnRow.appendChild(saveBtn);
+        btnRow.appendChild(cancelBtn);
+
+        modal.appendChild(title);
+        modal.appendChild(info);
+        modal.appendChild(usernameLabel);
+        modal.appendChild(passwordLabel);
+        modal.appendChild(btnRow);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+        return overlay;
+    }
+
+    function showMultiplayerProgress(appid) {
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:99999;display:flex;align-items:center;justify-content:center;';
+        overlay.className = 'MangoUnlock-mp-progress-overlay';
+
+        const modal = document.createElement('div');
+        modal.style.cssText = 'background:#1b2838;color:#fff;border:1px solid #2a475e;border-radius:4px;min-width:320px;max-width:520px;padding:18px 20px;box-shadow:0 8px 24px rgba(0,0,0,.6);';
+
+        const title = document.createElement('div');
+        title.style.cssText = 'font-size:16px;color:#5ba32b;margin-bottom:10px;font-weight:600;';
+        title.textContent = 'Multiplayer Fix';
+
+        const status = document.createElement('div');
+        status.style.cssText = 'font-size:14px;line-height:1.6;margin-bottom:12px;';
+        status.textContent = 'Starting...';
+
+        const logBox = document.createElement('div');
+        logBox.style.cssText = 'background:#0e1a26;border:1px solid #2a475e;border-radius:2px;padding:8px;font-family:monospace;font-size:11px;color:#67c1f5;max-height:120px;overflow-y:auto;margin-bottom:12px;';
+        logBox.textContent = 'Initializing...';
+
+        const btnRow = document.createElement('div');
+        btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;';
+        const closeBtn = createButton('Close');
+        closeBtn.style.display = 'none';
+        closeBtn.onclick = function(e){
+            e.preventDefault();
+            overlay.remove();
+        };
+        btnRow.appendChild(closeBtn);
+
+        modal.appendChild(title);
+        modal.appendChild(status);
+        modal.appendChild(logBox);
+        modal.appendChild(btnRow);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+
+        let pollInterval = null;
+        let lastMessage = '';
+
+        function addLog(msg) {
+            if (msg && msg !== lastMessage) {
+                lastMessage = msg;
+                const line = document.createElement('div');
+                line.textContent = msg;
+                logBox.appendChild(line);
+                logBox.scrollTop = logBox.scrollHeight;
+            }
+        }
+
+        function pollStatus() {
+            backendCall('GetMultiplayerFixStatus', { appid: appid }).then(function(res) {
+                try {
+                    const payload = typeof res === 'string' ? JSON.parse(res) : res;
+                    if (payload && payload.success && payload.state) {
+                        const state = payload.state;
+                        const statusText = state.status || 'unknown';
+                        const message = state.message || '';
+                        
+                        if (statusText === 'queued') {
+                            status.textContent = 'Queued...';
+                        } else if (statusText === 'starting') {
+                            status.textContent = 'Starting...';
+                            addLog(message || 'Initializing browser...');
+                        } else if (statusText === 'searching') {
+                            status.textContent = 'Searching...';
+                            addLog(message || 'Searching for fix...');
+                        } else if (statusText === 'logging_in') {
+                            status.textContent = 'Logging in...';
+                            addLog(message || 'Authenticating...');
+                        } else if (statusText === 'finding_download') {
+                            status.textContent = 'Finding download...';
+                            addLog(message || 'Locating download link...');
+                        } else if (statusText === 'downloading') {
+                            status.textContent = 'Downloading...';
+                            addLog(message || 'Downloading fix...');
+                        } else if (statusText === 'extracting') {
+                            status.textContent = 'Extracting...';
+                            addLog(message || 'Extracting files...');
+                        } else if (statusText === 'done') {
+                            status.style.color = '#5ba32b';
+                            status.textContent = '✅ Fix installed successfully!';
+                            addLog(message || 'Fix installed!');
+                            closeBtn.style.display = '';
+                            if (pollInterval) {
+                                clearInterval(pollInterval);
+                                pollInterval = null;
+                            }
+                        } else if (statusText === 'login_required') {
+                            // Login timed out - show credentials modal
+                            if (pollInterval) {
+                                clearInterval(pollInterval);
+                                pollInterval = null;
+                            }
+                            overlay.remove();
+                            showCredentialsModal(function() {
+                                startMultiplayerFix(appid, null);
+                            });
+                        } else if (statusText === 'failed') {
+                            const errorText = state.error || 'Unknown error';
+                            const isCredentialError = errorText.toLowerCase().includes('credential') ||
+                                                       errorText.toLowerCase().includes('login') ||
+                                                       errorText.toLowerCase().includes('auth') ||
+                                                       errorText.toLowerCase().includes('password') ||
+                                                       errorText.toLowerCase().includes('username') ||
+                                                       errorText.toLowerCase().includes('sign in') ||
+                                                       errorText.toLowerCase().includes('logged in');
+                            
+                            if (pollInterval) {
+                                clearInterval(pollInterval);
+                                pollInterval = null;
+                            }
+                            
+                            if (isCredentialError) {
+                                // Close progress overlay and show credentials modal
+                                overlay.remove();
+                                showCredentialsModal(function() {
+                                    // Retry after saving new credentials
+                                    startMultiplayerFix(appid, null);
+                                });
+                            } else {
+                                status.style.color = '#c94a4a';
+                                status.textContent = '❌ Fix failed';
+                                addLog('Error: ' + errorText);
+                                closeBtn.style.display = '';
+                            }
+                        }
+                    }
+                } catch (err) {
+                    console.warn('[MangoUnlock] MP status parse error', err);
+                }
+            }).catch(function(err) {
+                console.warn('[MangoUnlock] MP status fetch error', err);
+            });
+        }
+
+        pollStatus();
+        pollInterval = setInterval(pollStatus, 1500);
+
+        return { overlay, status, logBox, closeBtn };
+    }
+
+    function startMultiplayerFix(appid, container) {
+        backendCall('StartMultiplayerFix', { appid: appid }).then(function(res) {
+            try {
+                const payload = typeof res === 'string' ? JSON.parse(res) : res;
+                if (payload && payload.success) {
+                    showMultiplayerProgress(appid);
+                } else if (payload && payload.need_credentials) {
+                    // Show credentials modal, then retry
+                    showCredentialsModal(function() {
+                        startMultiplayerFix(appid, container);
+                    });
+                } else {
+                    const errorMsg = (payload && payload.error) ? payload.error : 'Failed to start fix';
+                    showOverlay('Multiplayer Fix Error: ' + errorMsg);
+                }
+            } catch (err) {
+                showOverlay('Multiplayer Fix Error: ' + err.message);
+            }
+        }).catch(function(err) {
+            showOverlay('Multiplayer Fix Error: ' + err.message);
+        });
+    }
+
+    // ==================== END MULTIPLAYER FIX FUNCTIONS ====================
+
     function init() {
         ensureButtons();
         if (typeof MutationObserver !== 'undefined') {
-            const observer = new MutationObserver(() => ensureButtons());
+            const observer = new MutationObserver(() => {
+                ensureButtons();
+            });
             observer.observe(document.body, { childList: true, subtree: true });
         }
         setInterval(ensureButtons, 2000);
