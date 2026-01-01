@@ -1281,7 +1281,7 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
         opts = Options()
         opts.add_argument("--window-size=1280,800")
         opts.add_argument("--mute-audio")
-        #opts.add_argument("--headless")
+        opts.add_argument("--headless")
         opts.add_argument("--log-level=3")
         opts.add_argument("--disable-gpu")
         opts.add_argument("--no-sandbox")
@@ -2852,3 +2852,4 @@ def _find_steam_path() -> str:
             logger.warn(f'MangoUnlock: Failed to read Steam path from registry: {e}')
 
     return ''
+
