@@ -235,9 +235,27 @@ function Install-MangoUnlockPlugin {
 }
 
 $millenniumPath = Join-Path $steamPath "millennium.dll"
+$millenniumInstalled = $false
 
 if (Test-Path $millenniumPath) {
-    Log-Message "Millennium already installed" $Green
+    try {
+        $versionStr = (Get-Item $millenniumPath).VersionInfo.FileVersion
+        $versionStr = $versionStr -replace '^v\.?', ''
+        $currentVersion = [Version]$versionStr
+        $requiredVersion = [Version]"2.34.0"
+        
+        if ($currentVersion -ge $requiredVersion) {
+            $millenniumInstalled = $true
+            Log-Message "Millennium already installed (v$versionStr)" $Green
+        } else {
+            Log-Message "Millennium version $versionStr is outdated (requires v2.34.0+)" $Yellow
+        }
+    } catch {
+        Log-Message "Could not determine Millennium version - will reinstall" $Yellow
+    }
+}
+
+if ($millenniumInstalled) {
     Install-MangoUnlockPlugin
 
     Start-Section "Launching Steam"
