@@ -1126,17 +1126,18 @@ def _wait_for_download(folder: str, max_wait: int = 600, appid: int = None) -> s
     """
     Wait for download to complete in folder.
     
-    Enhanced with detection for stalled downloads or antivirus interference.
-    Updates multiplayer fix state if appid is provided.
+    - If no file appears within 5 seconds, abort with AV blocking error
+    - If file exists but size doesn't change, warn about slow connection
+    - Returns empty string and sets 'failed' status on error
     """
     start = time.time()
     exts = (".rar", ".zip", ".7z")
     sizes = {}
     stable = {}
-    last_progress_time = time.time()
+    last_size_change_time = time.time()
     last_total_size = 0
-    no_file_checks = 0
-    stall_warning_shown = False
+    file_found = False
+    slow_warning_shown = False
     
     while (time.time() - start) < max_wait:
         try:
@@ -1150,13 +1151,14 @@ def _wait_for_download(folder: str, max_wait: int = 600, appid: int = None) -> s
                 lower = f.lower()
                 if any(lower.endswith(ext) for ext in exts):
                     found_any_file = True
+                    file_found = True
                     try:
                         size = os.path.getsize(full_path)
                         current_total_size += size
                         
                         if f in sizes and sizes[f] == size:
                             stable[f] = stable.get(f, 0) + 1
-                            if stable[f] >= 3:  # Stable for 9+ seconds
+                            if stable[f] >= 3:  # Stable for 3+ seconds (file complete)
                                 if appid:
                                     _set_multiplayer_fix_state(appid, {
                                         'status': 'downloading',
@@ -1177,71 +1179,55 @@ def _wait_for_download(folder: str, max_wait: int = 600, appid: int = None) -> s
                     except Exception:
                         pass
             
-            # Check if total size increased (progress detection)
+            # Track size changes
             if current_total_size > last_total_size:
-                last_progress_time = time.time()
+                last_size_change_time = time.time()
                 last_total_size = current_total_size
-                stall_warning_shown = False
+                slow_warning_shown = False
             
-            # Check for stalled download (no progress for 15+ seconds with file present)
-            time_since_progress = time.time() - last_progress_time
-            if found_any_file and time_since_progress >= 15 and not stall_warning_shown:
-                stall_warning_shown = True
-                logger.warn(f'Multiplayer: Download appears stalled for {time_since_progress:.0f} seconds')
+            elapsed = time.time() - start
+            time_since_change = time.time() - last_size_change_time
+            
+            # No file after 5 seconds = AV blocking
+            if not file_found and elapsed >= 5:
+                logger.error(f'Multiplayer: No download file after {elapsed:.0f}s - antivirus likely blocking')
+                if appid:
+                    _set_multiplayer_fix_state(appid, {
+                        'status': 'failed',
+                        'error': 'Download blocked by antivirus. Please disable AV or add an exclusion and try again.'
+                    })
+                return ''
+            
+            # File exists but no size change for 10+ seconds = slow connection
+            if found_any_file and time_since_change >= 10 and not slow_warning_shown:
+                slow_warning_shown = True
                 if appid:
                     _set_multiplayer_fix_state(appid, {
                         'status': 'downloading',
-                        'message': 'Download slow - check your connection...'
+                        'message': 'Download slow - check your internet connection...'
                     })
             
-            # Check for no file appearing (possible AV interference)
-            if not found_any_file:
-                no_file_checks += 1
-                # After 10 checks (30+ seconds) with no file, warn about possible AV
-                if no_file_checks >= 10:
-                    elapsed = time.time() - start
-                    logger.warn(f'Multiplayer: No download file detected after {elapsed:.0f} seconds - possible AV interference')
-                    if appid:
-                        _set_multiplayer_fix_state(appid, {
-                            'status': 'downloading',
-                            'message': 'No file detected - antivirus may be blocking download'
-                        })
-                    # Only show this warning once per 30 seconds
-                    if no_file_checks % 10 == 0:
-                        logger.warn(f'Multiplayer: Still no download file after {elapsed:.0f}s - antivirus or slow connection likely')
-            else:
-                no_file_checks = 0  # Reset if we see a file
-            
-            # Check for prolonged stall (30+ seconds no progress) - likely AV grabbed it
-            if found_any_file and time_since_progress >= 30:
-                logger.warn(f'Multiplayer: Download stalled for {time_since_progress:.0f}s - file may have been quarantined')
+            # File exists but no size change for 30+ seconds = stalled, abort
+            if found_any_file and time_since_change >= 30:
+                logger.error(f'Multiplayer: Download stalled for {time_since_change:.0f}s')
                 if appid:
                     _set_multiplayer_fix_state(appid, {
-                        'status': 'downloading',
-                        'message': 'Download stalled - antivirus may have quarantined the file'
+                        'status': 'failed',
+                        'error': 'Download stalled - slow connection or file was quarantined by antivirus.'
                     })
+                return ''
                     
         except Exception as e:
             logger.warn(f'Multiplayer: Error checking download folder: {e}')
         
-        time.sleep(3)
+        time.sleep(1)  # Check every 1 second for faster response
     
     # Timeout reached
-    elapsed = time.time() - start
-    if last_total_size == 0:
-        logger.error(f'Multiplayer: Download timeout after {elapsed:.0f}s - no file was downloaded (likely blocked by antivirus)')
-        if appid:
-            _set_multiplayer_fix_state(appid, {
-                'status': 'failed',
-                'error': 'Download failed - antivirus may be blocking. Try disabling it temporarily.'
-            })
-    else:
-        logger.error(f'Multiplayer: Download timeout after {elapsed:.0f}s - file incomplete ({last_total_size} bytes)')
-        if appid:
-            _set_multiplayer_fix_state(appid, {
-                'status': 'failed',
-                'error': 'Download incomplete - slow connection or antivirus interference'
-            })
+    if appid:
+        _set_multiplayer_fix_state(appid, {
+            'status': 'failed',
+            'error': 'Download timeout - check your connection and try again.'
+        })
     
     return ''
 
@@ -1262,10 +1248,13 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
         return
     
     driver = None
-    temp = os.path.join(tempfile.gettempdir(), "MangoMultiplayer", "dl")
+    # Use %APPDATA%/mangoplugin for downloads instead of temp
+    appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
+    temp_parent = os.path.join(appdata, "mangoplugin")
+    temp = os.path.join(temp_parent, "dl")
     os.makedirs(temp, exist_ok=True)
     
-    # Clean temp folder
+    # Clean download folder before starting
     for f in os.listdir(temp):
         try:
             os.remove(os.path.join(temp, f))
@@ -1493,13 +1482,23 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
                 driver.quit()
             except Exception:
                 pass
-        # Cleanup temp folder
+        # Always cleanup the contents inside mangoplugin folder (keep folder for AV exclusion)
         try:
-            temp_parent = os.path.join(tempfile.gettempdir(), "MangoMultiplayer")
-            if os.path.exists(temp_parent):
-                shutil.rmtree(temp_parent, ignore_errors=True)
-        except Exception:
-            pass
+            appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
+            mango_folder = os.path.join(appdata, "mangoplugin")
+            if os.path.exists(mango_folder):
+                for item in os.listdir(mango_folder):
+                    item_path = os.path.join(mango_folder, item)
+                    try:
+                        if os.path.isfile(item_path):
+                            os.remove(item_path)
+                        elif os.path.isdir(item_path):
+                            shutil.rmtree(item_path, ignore_errors=True)
+                    except Exception:
+                        pass
+                logger.log(f'Multiplayer: Cleaned up contents of {mango_folder}')
+        except Exception as cleanup_err:
+            logger.warn(f'Multiplayer: Failed to cleanup mangoplugin folder: {cleanup_err}')
 
 # ===== Multiplayer Fix Frontend API Functions =====
 
