@@ -71,6 +71,12 @@
 .MangoUnlock-multiplayer-button:hover{
     background: linear-gradient(to bottom, #6cb93c 0%, #5ba32b 50%, #4a8f24 100%) !important;
 }
+.MangoUnlock-multiplayer-button.MangoUnlock-remove-mode{
+    background: linear-gradient(to bottom, #8f4444 0%, #7a3838 50%, #652d2d 100%) !important;
+}
+.MangoUnlock-multiplayer-button.MangoUnlock-remove-mode:hover{
+    background: linear-gradient(to bottom, #a55050 0%, #8f4444 50%, #7a3838 100%) !important;
+}
 .MangoUnlock-input{
     background-color: #233748 !important;
     border: 1px solid #3d6889 !important;
@@ -383,12 +389,23 @@
         unavailableBtn.style.pointerEvents = 'none';
 
         // Multiplayer Fix button - only shown for games added via MangoUnlock that have multiplayer
+        // Shows "Remove Fix" if fix is already applied, otherwise "Fix Multiplayer"
         const mpFixBtn = createButton('🔧 Fix Multiplayer', referenceBtn, 'MangoUnlock-multiplayer-button');
         mpFixBtn.dataset.appid = String(appid);
         mpFixBtn.style.display = 'none';
         mpFixBtn.onclick = function(e){
             e.preventDefault();
-            startMultiplayerFix(appid, container);
+            if (state.mpFixApplied) {
+                // Remove the fix
+                showConfirmModal('Remove Multiplayer Fix', 
+                    'Are you sure you want to remove the multiplayer fix? This will restore the original game files.',
+                    function() {
+                        removeMultiplayerFix(appid, container);
+                    });
+            } else {
+                // Apply the fix
+                startMultiplayerFix(appid, container);
+            }
         };
 
         container.appendChild(restartBtn);
@@ -408,6 +425,7 @@
             indeterminate: false,
             message: null,
             hasMultiplayer: null,
+            mpFixApplied: false,
         };
 
         function render() {
@@ -421,6 +439,16 @@
                 // Show multiplayer fix button if game was added AND has multiplayer
                 if (state.hasMultiplayer === true) {
                     mpFixBtn.style.display = '';
+                    // Update button text and style based on whether fix is applied
+                    if (state.mpFixApplied) {
+                        mpFixSpan.textContent = '🔧 Remove Fix';
+                        mpFixBtn.title = 'Remove the multiplayer fix and restore original files';
+                        mpFixBtn.classList.add('MangoUnlock-remove-mode');
+                    } else {
+                        mpFixSpan.textContent = '🔧 Fix Multiplayer';
+                        mpFixBtn.title = 'Apply multiplayer fix for online play';
+                        mpFixBtn.classList.remove('MangoUnlock-remove-mode');
+                    }
                 }
                 return;
             }
@@ -464,6 +492,7 @@
             state.indeterminate = false;
             state.message = null;
             state.hasMultiplayer = null;
+            state.mpFixApplied = false;
             render();
 
             // DLCs are fetched on-demand when user clicks Add - no prefetching needed
@@ -475,12 +504,30 @@
                 
                 // If game exists in MangoUnlock, check if it has multiplayer
                 if (state.exists) {
+                    // Check multiplayer capability
                     backendCall('CheckGameHasMultiplayer', { appid: appid }).then((mpRes) => {
                         try {
                             const mpPayload = typeof mpRes === 'string' ? JSON.parse(mpRes) : mpRes;
                             if (mpPayload && mpPayload.success) {
                                 state.hasMultiplayer = !!mpPayload.has_multiplayer;
                                 render();
+                                
+                                // Also check if multiplayer fix is already applied
+                                if (state.hasMultiplayer) {
+                                    backendCall('IsMultiplayerFixApplied', { appid: appid }).then((fixRes) => {
+                                        try {
+                                            const fixPayload = typeof fixRes === 'string' ? JSON.parse(fixRes) : fixRes;
+                                            if (fixPayload && fixPayload.success) {
+                                                state.mpFixApplied = !!fixPayload.is_applied;
+                                                render();
+                                            }
+                                        } catch (err) {
+                                            console.warn('[MangoUnlock] Fix applied check parse error', err);
+                                        }
+                                    }).catch((err) => {
+                                        console.warn('[MangoUnlock] Fix applied check failed', err);
+                                    });
+                                }
                             }
                         } catch (err) {
                             console.warn('[MangoUnlock] Multiplayer check parse error', err);
@@ -853,6 +900,10 @@
                                 clearInterval(pollInterval);
                                 pollInterval = null;
                             }
+                            // Refresh buttons to show "Remove Fix" option
+                            setTimeout(function() {
+                                refreshButtons(appid);
+                            }, 500);
                         } else if (statusText === 'login_required') {
                             // Login timed out - show credentials modal
                             if (pollInterval) {
@@ -927,6 +978,44 @@
             }
         }).catch(function(err) {
             showOverlay('Multiplayer Fix Error: ' + err.message);
+        });
+    }
+
+    function removeMultiplayerFix(appid, container) {
+        // Show a loading overlay
+        const overlay = showOverlay('Removing multiplayer fix...');
+        
+        backendCall('RemoveMultiplayerFix', { appid: appid }).then(function(res) {
+            try {
+                const payload = typeof res === 'string' ? JSON.parse(res) : res;
+                if (payload && payload.success) {
+                    overlay.body.textContent = payload.message || 'Fix removed successfully!';
+                    overlay.body.style.color = '#5ba32b';
+                } else {
+                    const errorMsg = (payload && payload.message) ? payload.message : 'Failed to remove fix';
+                    overlay.body.textContent = 'Error: ' + errorMsg;
+                    overlay.body.style.color = '#c94a4a';
+                }
+                // Always refresh buttons after remove attempt (success or failure)
+                // This ensures the button goes back to "Fix Multiplayer" if the log was cleaned up
+                setTimeout(function() {
+                    refreshButtons(appid);
+                }, 1000);
+            } catch (err) {
+                overlay.body.textContent = 'Error: ' + err.message;
+                overlay.body.style.color = '#c94a4a';
+                // Still refresh on parse error
+                setTimeout(function() {
+                    refreshButtons(appid);
+                }, 1000);
+            }
+        }).catch(function(err) {
+            overlay.body.textContent = 'Error: ' + err.message;
+            overlay.body.style.color = '#c94a4a';
+            // Still refresh on network error
+            setTimeout(function() {
+                refreshButtons(appid);
+            }, 1000);
         });
     }
 

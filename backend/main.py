@@ -88,6 +88,7 @@ UPDATE_DISMISSED_LOCK = threading.Lock()
 
 # ==================== MULTIPLAYER FIX CONFIGURATION ====================
 MULTIPLAYER_CONFIG_FILE = 'multiplayer.json'
+MULTIPLAYER_FIX_LOG_FILE = 'multiplayer_fixes.json'  # Log of applied multiplayer fixes
 MULTIPLAYER_CACHE = {}  # Cache for multiplayer check results
 MULTIPLAYER_CACHE_LOCK = threading.Lock()
 MULTIPLAYER_CACHE_TTL = 30 * 60  # 30 minutes
@@ -487,6 +488,69 @@ def _save_multiplayer_config(config: dict) -> bool:
     cfg_path = os.path.join(GetPluginDir(), 'backend', MULTIPLAYER_CONFIG_FILE)
     return _write_json(cfg_path, config)
 
+def _get_multiplayer_fix_log_path() -> str:
+    """Get the path to the multiplayer fix log file."""
+    return os.path.join(GetPluginDir(), 'backend', MULTIPLAYER_FIX_LOG_FILE)
+
+def _read_multiplayer_fix_log() -> dict:
+    """Read the multiplayer fix log. Returns dict of appid -> fix info."""
+    return _read_json(_get_multiplayer_fix_log_path())
+
+def _save_multiplayer_fix_log(log: dict) -> bool:
+    """Save the multiplayer fix log."""
+    return _write_json(_get_multiplayer_fix_log_path(), log)
+
+def _log_multiplayer_fix(appid: int, game_name: str, game_folder: str, added_files: list, backed_up_files: list) -> bool:
+    """
+    Log a multiplayer fix application.
+    
+    Args:
+        appid: Game app ID
+        game_name: Name of the game
+        game_folder: Path to the game folder
+        added_files: List of files added from the archive (relative paths)
+        backed_up_files: List of dicts with 'original' and 'backup' paths (absolute)
+    """
+    try:
+        log = _read_multiplayer_fix_log()
+        log[str(appid)] = {
+            'appid': appid,
+            'game_name': game_name,
+            'game_folder': game_folder,
+            'added_files': added_files,
+            'backed_up_files': backed_up_files,
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
+        }
+        if _save_multiplayer_fix_log(log):
+            logger.log(f'Multiplayer: Logged fix for {game_name} ({appid}) - {len(added_files)} files added, {len(backed_up_files)} files backed up')
+            return True
+        return False
+    except Exception as e:
+        logger.warn(f'Multiplayer: Failed to log fix for {appid}: {e}')
+        return False
+
+def _get_multiplayer_fix_info(appid: int) -> dict:
+    """Get the fix info for a specific appid, or empty dict if not found."""
+    log = _read_multiplayer_fix_log()
+    return log.get(str(appid), {})
+
+def _remove_multiplayer_fix_log_entry(appid: int) -> bool:
+    """Remove a multiplayer fix log entry."""
+    try:
+        log = _read_multiplayer_fix_log()
+        if str(appid) in log:
+            del log[str(appid)]
+            return _save_multiplayer_fix_log(log)
+        return True
+    except Exception as e:
+        logger.warn(f'Multiplayer: Failed to remove log entry for {appid}: {e}')
+        return False
+
+def _is_multiplayer_fix_applied(appid: int) -> bool:
+    """Check if a multiplayer fix has been applied to a game."""
+    info = _get_multiplayer_fix_info(appid)
+    return bool(info)
+
 def _get_multiplayer_cache_entry(appid: int):
     """Get cached multiplayer check result."""
     now = time.time()
@@ -672,35 +736,512 @@ def _extract_archive(archive: str, target: str, atype: str, apath: str, pwd: str
         logger.warn(f'Multiplayer: Archive extraction failed: {e}')
         return False
 
-def _wait_for_download(folder: str, max_wait: int = 600) -> str:
-    """Wait for download to complete in folder."""
+def _list_archive_contents(archive: str, atype: str, apath: str, pwd: str = "online-fix.me") -> list:
+    """List the contents of an archive without extracting. Returns list of relative file paths."""
+    files = []
+    logger.log(f'Multiplayer: Listing archive contents: {archive}')
+    try:
+        if atype == "winrar":
+            # WinRAR GUI (winrar.exe) doesn't support list commands well
+            # Return empty to trigger directory scanning fallback
+            logger.log(f'Multiplayer: WinRAR detected - using directory scan instead of archive listing')
+            return []
+        else:
+            # 7-Zip: l = list, -slt = show technical info
+            cmd = [apath, "l", f"-p{pwd}", "-slt", archive]
+        
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        
+        logger.log(f'Multiplayer: Running archive list command: {atype}')
+        result = subprocess.run(cmd, capture_output=True, timeout=30,
+                                startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW,
+                                text=True, encoding='utf-8', errors='ignore')
+        
+        logger.log(f'Multiplayer: Archive list command completed (exit code: {result.returncode})')
+        
+        # 7-Zip -slt output has "Path = filename" lines
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith('Path = '):
+                path = line[7:]  # Remove "Path = " prefix
+                if path and not path.endswith('\\') and not path.endswith('/'):
+                    files.append(path)
+        
+        logger.log(f'Multiplayer: Listed {len(files)} files in archive')
+    except subprocess.TimeoutExpired:
+        logger.warn(f'Multiplayer: Timeout listing archive contents (>30s) - will use directory scan instead')
+    except Exception as e:
+        logger.warn(f'Multiplayer: Failed to list archive contents: {e}')
+    
+    return files
+
+def _scan_directory_files(directory: str) -> dict:
+    """
+    Scan a directory recursively and return dict of relative_path -> (mtime, size).
+    Used for detecting changes before/after extraction.
+    """
+    files = {}
+    try:
+        for root, dirs, filenames in os.walk(directory):
+            for fname in filenames:
+                full_path = os.path.join(root, fname)
+                rel_path = os.path.relpath(full_path, directory)
+                try:
+                    stat = os.stat(full_path)
+                    files[rel_path] = (stat.st_mtime, stat.st_size)
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.warn(f'Multiplayer: Error scanning directory {directory}: {e}')
+    return files
+
+def _compare_directory_scans(before: dict, after: dict) -> tuple:
+    """
+    Compare two directory scans to find added and modified files.
+    Returns (added_files, modified_files) as lists of relative paths.
+    Excludes .bak files from the results.
+    """
+    added = []
+    modified = []
+    
+    for rel_path, (mtime, size) in after.items():
+        # Skip .bak files - these are our backups, not from the archive
+        if rel_path.endswith('.bak'):
+            continue
+        if rel_path not in before:
+            added.append(rel_path)
+        else:
+            old_mtime, old_size = before[rel_path]
+            if mtime != old_mtime or size != old_size:
+                modified.append(rel_path)
+    
+    return (added, modified)
+
+def _run_extraction_with_timeout(cmd: list, timeout: int = 300) -> tuple:
+    """
+    Run extraction command with timeout and progress monitoring.
+    Returns (success, stdout, stderr, error_message)
+    """
+    try:
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        
+        logger.log(f'Multiplayer: Starting extraction process...')
+        start_time = time.time()
+        
+        # Use Popen for better control
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            startupinfo=startupinfo,
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        
+        # Monitor the process with periodic logging
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=10)
+                elapsed = time.time() - start_time
+                logger.log(f'Multiplayer: Extraction completed in {elapsed:.1f}s')
+                
+                if process.returncode == 0:
+                    return (True, stdout, stderr, None)
+                else:
+                    error_msg = stderr.decode('utf-8', errors='ignore') if stderr else f'Exit code: {process.returncode}'
+                    logger.warn(f'Multiplayer: Extraction failed with code {process.returncode}: {error_msg[:200]}')
+                    return (False, stdout, stderr, error_msg)
+            except subprocess.TimeoutExpired:
+                elapsed = time.time() - start_time
+                if elapsed > timeout:
+                    process.kill()
+                    logger.error(f'Multiplayer: Extraction timeout after {elapsed:.1f}s')
+                    return (False, None, None, f'Extraction timeout after {timeout}s')
+                else:
+                    logger.log(f'Multiplayer: Extraction in progress... {elapsed:.0f}s elapsed')
+                    continue
+                    
+    except Exception as e:
+        logger.error(f'Multiplayer: Extraction process error: {e}')
+        return (False, None, None, str(e))
+
+def _extract_archive_with_backup(archive: str, target: str, atype: str, apath: str, 
+                                  appid: int, game_name: str, pwd: str = "online-fix.me") -> tuple:
+    """
+    Extract archive to target directory with backup of existing files.
+    
+    Returns tuple of (success, added_files, backed_up_files)
+    - added_files: list of relative paths of files added
+    - backed_up_files: list of dicts with 'original' and 'backup' absolute paths
+    """
+    added_files = []
+    backed_up_files = []
+    use_directory_scan = False
+    
+    try:
+        _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': 'Analyzing archive contents...'})
+        
+        # First, try to list all files in the archive
+        archive_files = _list_archive_contents(archive, atype, apath, pwd)
+        
+        if not archive_files:
+            logger.warn(f'Multiplayer: Could not list archive contents - will use directory scanning')
+            _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': 'Scanning game directory...'})
+            use_directory_scan = True
+        else:
+            logger.log(f'Multiplayer: Archive contains {len(archive_files)} files for {game_name} ({appid})')
+            # Log each file that will be extracted
+            for f in archive_files:
+                logger.log(f'Multiplayer: Archive file: {f}')
+        
+        # If using directory scan, capture before state AND backup existing files
+        dir_before = {}
+        if use_directory_scan:
+            logger.log(f'Multiplayer: Scanning directory before extraction: {target}')
+            dir_before = _scan_directory_files(target)
+            logger.log(f'Multiplayer: Found {len(dir_before)} existing files in game directory')
+            
+            # Back up ALL existing files before extraction (we don't know which will be replaced)
+            # We'll clean up unnecessary backups after extraction
+            _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': f'Backing up {len(dir_before)} existing files...'})
+            
+            for rel_path in dir_before.keys():
+                full_path = os.path.join(target, rel_path)
+                backup_path = full_path + '.bak'
+                try:
+                    # Skip if it's already a .bak file
+                    if rel_path.endswith('.bak'):
+                        continue
+                    # If backup already exists, skip (might be from previous attempt)
+                    if os.path.exists(backup_path):
+                        continue
+                    # Copy the file to .bak (don't rename - we need original for extraction to overwrite)
+                    shutil.copy2(full_path, backup_path)
+                    logger.log(f'Multiplayer: Pre-backed up {rel_path}')
+                except Exception as e:
+                    logger.warn(f'Multiplayer: Failed to pre-backup {full_path}: {e}')
+            
+            _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': f'Backups created, extracting...'})
+        else:
+            _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': f'Preparing {len(archive_files)} files...'})
+            
+            # Check which files already exist and need backup (only if we have archive list)
+            files_to_backup = []
+            for rel_path in archive_files:
+                # Normalize path separators
+                rel_path_norm = rel_path.replace('/', os.sep).replace('\\', os.sep)
+                full_path = os.path.join(target, rel_path_norm)
+                
+                if os.path.exists(full_path) and os.path.isfile(full_path):
+                    files_to_backup.append((rel_path_norm, full_path))
+                    logger.log(f'Multiplayer: File exists, will backup: {full_path}')
+            
+            # Backup existing files (rename to .bak)
+            if files_to_backup:
+                _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': f'Backing up {len(files_to_backup)} existing files...'})
+            
+            for rel_path, full_path in files_to_backup:
+                backup_path = full_path + '.bak'
+                try:
+                    # If backup already exists, remove it first
+                    if os.path.exists(backup_path):
+                        os.remove(backup_path)
+                    os.rename(full_path, backup_path)
+                    backed_up_files.append({
+                        'original': full_path,
+                        'backup': backup_path,
+                        'relative': rel_path
+                    })
+                    logger.log(f'Multiplayer: Backed up {full_path} -> {backup_path}')
+                except Exception as e:
+                    logger.warn(f'Multiplayer: Failed to backup {full_path}: {e}')
+        
+        _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': 'Extracting files to game folder...'})
+        
+        # Now extract the archive using the new method with progress monitoring
+        if atype == "winrar":
+            cmd = [apath, "x", f"-p{pwd}", "-y", archive, target + os.sep]
+        else:
+            cmd = [apath, "x", f"-p{pwd}", "-y", f"-o{target}", archive]
+        
+        success, stdout, stderr, error_msg = _run_extraction_with_timeout(cmd, timeout=300)
+        
+        if not success:
+            raise Exception(error_msg or 'Extraction failed')
+        
+        _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': 'Verifying extracted files...'})
+        
+        if use_directory_scan:
+            # Compare directory before and after to find added/modified files
+            logger.log(f'Multiplayer: Scanning directory after extraction...')
+            dir_after = _scan_directory_files(target)
+            new_files, modified_files = _compare_directory_scans(dir_before, dir_after)
+            
+            logger.log(f'Multiplayer: Directory scan found {len(new_files)} new files, {len(modified_files)} modified files')
+            
+            # New files are definitely from the archive - these will be deleted on removal
+            for rel_path in new_files:
+                added_files.append(rel_path)
+                logger.log(f'Multiplayer: Added file (detected): {rel_path}')
+            
+            # Modified files - these were replaced, we have pre-created backups
+            # These should NOT be in added_files - they will be restored from backup, not deleted
+            for rel_path in modified_files:
+                logger.log(f'Multiplayer: Modified file (detected): {rel_path}')
+                full_path = os.path.join(target, rel_path)
+                backup_path = full_path + '.bak'
+                if os.path.exists(backup_path):
+                    backed_up_files.append({
+                        'original': full_path,
+                        'backup': backup_path,
+                        'relative': rel_path
+                    })
+                    logger.log(f'Multiplayer: Backup exists for modified file: {backup_path}')
+                else:
+                    # No backup exists - shouldn't happen but add to added_files so it gets removed
+                    logger.warn(f'Multiplayer: No backup found for modified file: {rel_path}')
+                    added_files.append(rel_path)
+            
+            # Clean up unnecessary backups (files that weren't modified)
+            _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': 'Cleaning up unnecessary backups...'})
+            cleaned_count = 0
+            for rel_path in dir_before.keys():
+                if rel_path.endswith('.bak'):
+                    continue
+                # If file wasn't modified, remove the backup we created
+                if rel_path not in modified_files:
+                    backup_path = os.path.join(target, rel_path) + '.bak'
+                    try:
+                        if os.path.exists(backup_path):
+                            os.remove(backup_path)
+                            cleaned_count += 1
+                    except Exception:
+                        pass
+            if cleaned_count > 0:
+                logger.log(f'Multiplayer: Cleaned up {cleaned_count} unnecessary backup files')
+        else:
+            # Record all added files from the archive list
+            for rel_path in archive_files:
+                rel_path_norm = rel_path.replace('/', os.sep).replace('\\', os.sep)
+                full_path = os.path.join(target, rel_path_norm)
+                if os.path.exists(full_path):
+                    added_files.append(rel_path_norm)
+                    logger.log(f'Multiplayer: Added file: {full_path}')
+        
+        # Log the fix
+        _log_multiplayer_fix(appid, game_name, target, added_files, backed_up_files)
+        
+        logger.log(f'Multiplayer: Extraction complete for {game_name} ({appid}) - {len(added_files)} files added, {len(backed_up_files)} files backed up')
+        return (True, added_files, backed_up_files)
+        
+    except Exception as e:
+        logger.error(f'Multiplayer: Extraction with backup failed for {appid}: {e}')
+        _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': f'Extraction error: {str(e)[:50]}'})
+        
+        # Try to restore backed up files on failure
+        for backup_info in backed_up_files:
+            try:
+                if os.path.exists(backup_info['backup']):
+                    if os.path.exists(backup_info['original']):
+                        os.remove(backup_info['original'])
+                    os.rename(backup_info['backup'], backup_info['original'])
+                    logger.log(f'Multiplayer: Restored backup on failure: {backup_info["original"]}')
+            except Exception as restore_err:
+                logger.warn(f'Multiplayer: Failed to restore backup: {restore_err}')
+        
+        return (False, [], [])
+
+def _remove_multiplayer_fix_files(appid: int) -> tuple:
+    """
+    Remove a multiplayer fix by deleting added files and restoring backups.
+    
+    Returns tuple of (success, message)
+    """
+    try:
+        fix_info = _get_multiplayer_fix_info(appid)
+        if not fix_info:
+            return (True, 'No fix record found - already removed')
+        
+        game_folder = fix_info.get('game_folder', '')
+        added_files = fix_info.get('added_files', [])
+        backed_up_files = fix_info.get('backed_up_files', [])
+        game_name = fix_info.get('game_name', f'Game {appid}')
+        
+        if not game_folder or not os.path.exists(game_folder):
+            _remove_multiplayer_fix_log_entry(appid)
+            logger.log(f'Multiplayer: Game folder no longer exists for {appid}, cleared fix record')
+            return (True, 'Game folder no longer exists - fix record cleared')
+        
+        removed_count = 0
+        restored_count = 0
+        errors = []
+        
+        # Remove added files
+        for rel_path in added_files:
+            full_path = os.path.join(game_folder, rel_path)
+            try:
+                if os.path.exists(full_path):
+                    os.remove(full_path)
+                    removed_count += 1
+                    logger.log(f'Multiplayer: Removed added file: {full_path}')
+            except Exception as e:
+                errors.append(f'Failed to remove {rel_path}: {e}')
+                logger.warn(f'Multiplayer: Failed to remove {full_path}: {e}')
+        
+        # Restore backed up files
+        for backup_info in backed_up_files:
+            original = backup_info.get('original', '')
+            backup = backup_info.get('backup', '')
+            try:
+                if backup and os.path.exists(backup):
+                    # Remove the new file if it still exists
+                    if os.path.exists(original):
+                        os.remove(original)
+                    # Restore the backup
+                    os.rename(backup, original)
+                    restored_count += 1
+                    logger.log(f'Multiplayer: Restored backup: {backup} -> {original}')
+            except Exception as e:
+                errors.append(f'Failed to restore backup: {e}')
+                logger.warn(f'Multiplayer: Failed to restore {backup}: {e}')
+        
+        # Remove the log entry
+        _remove_multiplayer_fix_log_entry(appid)
+        
+        if errors:
+            error_str = '; '.join(errors[:3])  # Limit error messages
+            return (True, f'Fix removed with {len(errors)} errors: {error_str}')
+        
+        logger.log(f'Multiplayer: Fix removed for {game_name} ({appid}) - {removed_count} files removed, {restored_count} backups restored')
+        return (True, f'Fix removed successfully. {removed_count} files removed, {restored_count} backups restored.')
+        
+    except Exception as e:
+        logger.error(f'Multiplayer: Failed to remove fix for {appid}: {e}')
+        return (False, str(e))
+
+def _wait_for_download(folder: str, max_wait: int = 600, appid: int = None) -> str:
+    """
+    Wait for download to complete in folder.
+    
+    Enhanced with detection for stalled downloads or antivirus interference.
+    Updates multiplayer fix state if appid is provided.
+    """
     start = time.time()
     exts = (".rar", ".zip", ".7z")
     sizes = {}
     stable = {}
+    last_progress_time = time.time()
+    last_total_size = 0
+    no_file_checks = 0
+    stall_warning_shown = False
     
     while (time.time() - start) < max_wait:
         try:
+            found_any_file = False
+            current_total_size = 0
+            
             for f in os.listdir(folder):
                 full_path = os.path.join(folder, f)
                 if not os.path.isfile(full_path):
                     continue
                 lower = f.lower()
                 if any(lower.endswith(ext) for ext in exts):
+                    found_any_file = True
                     try:
                         size = os.path.getsize(full_path)
+                        current_total_size += size
+                        
                         if f in sizes and sizes[f] == size:
                             stable[f] = stable.get(f, 0) + 1
                             if stable[f] >= 3:  # Stable for 9+ seconds
+                                if appid:
+                                    _set_multiplayer_fix_state(appid, {
+                                        'status': 'downloading',
+                                        'message': f'Download complete ({size // (1024*1024)} MB)'
+                                    })
                                 return full_path
                         else:
                             stable[f] = 0
                         sizes[f] = size
+                        
+                        # Update progress message
+                        if appid and size > 0:
+                            size_mb = size / (1024 * 1024)
+                            _set_multiplayer_fix_state(appid, {
+                                'status': 'downloading',
+                                'message': f'Downloading... {size_mb:.1f} MB'
+                            })
                     except Exception:
                         pass
-        except Exception:
-            pass
+            
+            # Check if total size increased (progress detection)
+            if current_total_size > last_total_size:
+                last_progress_time = time.time()
+                last_total_size = current_total_size
+                stall_warning_shown = False
+            
+            # Check for stalled download (no progress for 15+ seconds with file present)
+            time_since_progress = time.time() - last_progress_time
+            if found_any_file and time_since_progress >= 15 and not stall_warning_shown:
+                stall_warning_shown = True
+                logger.warn(f'Multiplayer: Download appears stalled for {time_since_progress:.0f} seconds')
+                if appid:
+                    _set_multiplayer_fix_state(appid, {
+                        'status': 'downloading',
+                        'message': 'Download slow - check your connection...'
+                    })
+            
+            # Check for no file appearing (possible AV interference)
+            if not found_any_file:
+                no_file_checks += 1
+                # After 10 checks (30+ seconds) with no file, warn about possible AV
+                if no_file_checks >= 10:
+                    elapsed = time.time() - start
+                    logger.warn(f'Multiplayer: No download file detected after {elapsed:.0f} seconds - possible AV interference')
+                    if appid:
+                        _set_multiplayer_fix_state(appid, {
+                            'status': 'downloading',
+                            'message': 'No file detected - antivirus may be blocking download'
+                        })
+                    # Only show this warning once per 30 seconds
+                    if no_file_checks % 10 == 0:
+                        logger.warn(f'Multiplayer: Still no download file after {elapsed:.0f}s - antivirus or slow connection likely')
+            else:
+                no_file_checks = 0  # Reset if we see a file
+            
+            # Check for prolonged stall (30+ seconds no progress) - likely AV grabbed it
+            if found_any_file and time_since_progress >= 30:
+                logger.warn(f'Multiplayer: Download stalled for {time_since_progress:.0f}s - file may have been quarantined')
+                if appid:
+                    _set_multiplayer_fix_state(appid, {
+                        'status': 'downloading',
+                        'message': 'Download stalled - antivirus may have quarantined the file'
+                    })
+                    
+        except Exception as e:
+            logger.warn(f'Multiplayer: Error checking download folder: {e}')
+        
         time.sleep(3)
+    
+    # Timeout reached
+    elapsed = time.time() - start
+    if last_total_size == 0:
+        logger.error(f'Multiplayer: Download timeout after {elapsed:.0f}s - no file was downloaded (likely blocked by antivirus)')
+        if appid:
+            _set_multiplayer_fix_state(appid, {
+                'status': 'failed',
+                'error': 'Download failed - antivirus may be blocking. Try disabling it temporarily.'
+            })
+    else:
+        logger.error(f'Multiplayer: Download timeout after {elapsed:.0f}s - file incomplete ({last_total_size} bytes)')
+        if appid:
+            _set_multiplayer_fix_state(appid, {
+                'status': 'failed',
+                'error': 'Download incomplete - slow connection or antivirus interference'
+            })
     
     return ''
 
@@ -893,10 +1434,14 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
                         pass
         
         _set_multiplayer_fix_state(appid, {'status': 'downloading', 'message': 'Waiting for download...'})
-        dl = _wait_for_download(temp, max_wait=600)
+        dl = _wait_for_download(temp, max_wait=600, appid=appid)
         
         if not dl:
-            _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'Download timeout'})
+            # Error message already set by _wait_for_download if appid provided
+            # Only set generic error if not already set
+            state = _get_multiplayer_fix_state(appid)
+            if state.get('status') != 'failed':
+                _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'Download timeout - check antivirus or connection'})
             return
         
         _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': 'Extracting fix...'})
@@ -920,7 +1465,9 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
             _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'No archiver found (need WinRAR or 7-Zip)'})
             return
         
-        if not _extract_archive(dl, gf, atype, apath):
+        # Use the new extraction with backup function
+        success, added_files, backed_up_files = _extract_archive_with_backup(dl, gf, atype, apath, appid, game_name)
+        if not success:
             _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'Extraction failed'})
             return
         
@@ -933,7 +1480,7 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
         _set_multiplayer_fix_state(appid, {
             'status': 'done',
             'success': True,
-            'message': f'Fix installed to {gf}'
+            'message': f'Fix installed to {gf} ({len(added_files)} files added, {len(backed_up_files)} backed up)'
         })
         logger.log(f'Multiplayer: Fix installed for {game_name} ({appid}) to {gf}')
         
@@ -1037,6 +1584,67 @@ def GetMultiplayerFixStatus(appid: int, contentScriptQuery: str = '') -> str:
     
     state = _get_multiplayer_fix_state(appid)
     return json.dumps({'success': True, 'state': state})
+
+def IsMultiplayerFixApplied(appid: int, contentScriptQuery: str = '') -> str:
+    """Check if a multiplayer fix has been applied to a game."""
+    try:
+        appid = int(appid)
+    except Exception:
+        return json.dumps({'success': False, 'error': 'Invalid appid'})
+    
+    is_applied = _is_multiplayer_fix_applied(appid)
+    fix_info = _get_multiplayer_fix_info(appid) if is_applied else {}
+    
+    return json.dumps({
+        'success': True,
+        'is_applied': is_applied,
+        'game_name': fix_info.get('game_name', ''),
+        'timestamp': fix_info.get('timestamp', ''),
+        'files_count': len(fix_info.get('added_files', [])),
+        'backups_count': len(fix_info.get('backed_up_files', []))
+    })
+
+def RemoveMultiplayerFix(appid: int, contentScriptQuery: str = '') -> str:
+    """Remove a previously applied multiplayer fix."""
+    try:
+        appid = int(appid)
+    except Exception:
+        return json.dumps({'success': False, 'error': 'Invalid appid'})
+    
+    success, message = _remove_multiplayer_fix_files(appid)
+    
+    if success:
+        logger.log(f'Multiplayer: Fix removed for appid {appid}')
+    else:
+        logger.warn(f'Multiplayer: Failed to remove fix for appid {appid}: {message}')
+    
+    return json.dumps({
+        'success': success,
+        'message': message
+    })
+
+def GetMultiplayerFixInfo(appid: int, contentScriptQuery: str = '') -> str:
+    """Get detailed info about an applied multiplayer fix."""
+    try:
+        appid = int(appid)
+    except Exception:
+        return json.dumps({'success': False, 'error': 'Invalid appid'})
+    
+    fix_info = _get_multiplayer_fix_info(appid)
+    if not fix_info:
+        return json.dumps({'success': False, 'error': 'No fix found for this game'})
+    
+    return json.dumps({
+        'success': True,
+        'info': {
+            'appid': fix_info.get('appid'),
+            'game_name': fix_info.get('game_name', ''),
+            'game_folder': fix_info.get('game_folder', ''),
+            'timestamp': fix_info.get('timestamp', ''),
+            'added_files': fix_info.get('added_files', []),
+            'backed_up_files': fix_info.get('backed_up_files', [])
+        }
+    })
 
 # ==================== END MULTIPLAYER FIX FUNCTIONS ====================
                                                     
