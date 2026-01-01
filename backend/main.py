@@ -1281,7 +1281,7 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
         opts = Options()
         opts.add_argument("--window-size=1280,800")
         opts.add_argument("--mute-audio")
-        opts.add_argument("--headless")
+        #opts.add_argument("--headless")
         opts.add_argument("--log-level=3")
         opts.add_argument("--disable-gpu")
         opts.add_argument("--no-sandbox")
@@ -1337,6 +1337,17 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
         _set_multiplayer_fix_state(appid, {'status': 'logging_in', 'message': 'Logging in...'})
         driver.execute_script("arguments[0].scrollIntoView(true);", best)
         driver.execute_script("arguments[0].click();", best)
+        
+        # Wait for page to load and check if game is no longer supported
+        time.sleep(2)
+        try:
+            page_source = driver.page_source or ""
+            if "Руководство закрыто" in page_source:
+                logger.warn(f'Multiplayer: Game {game_name} ({appid}) is no longer supported (Руководство закрыто)')
+                _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'Online-fix.me no longer has fix files for this game (guide closed)'})
+                return
+        except Exception as e:
+            logger.warn(f'Multiplayer: Error checking page source: {e}')
         
         try:
             wait.until(EC.presence_of_element_located((By.NAME, "login_name")))
@@ -1396,6 +1407,18 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
             if "uploads.online-fix.me" in driver.current_url.lower():
                 break
         
+        # Check if download page shows 401 Authorization Required (game no longer supported)
+        time.sleep(1)
+        try:
+            page_source = driver.page_source or ""
+            page_title = driver.title or ""
+            if "401 Authorization Required" in page_source or "401 Authorization Required" in page_title:
+                logger.warn(f'Multiplayer: Game {game_name} ({appid}) download returned 401 - no longer supported')
+                _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'Online-fix.me no longer has fix files for this game (401 unauthorized)'})
+                return
+        except Exception as e:
+            logger.warn(f'Multiplayer: Error checking download page: {e}')
+        
         # Look for Fix Repair link
         try:
             wait.until(EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, "Fix Repair")))
@@ -1408,6 +1431,17 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
                 driver.execute_script("arguments[0].scrollIntoView(true);", fix_links[0])
                 driver.execute_script("arguments[0].click();", fix_links[0])
                 time.sleep(2)
+                
+                # Check for 401 after clicking Fix Repair link
+                try:
+                    page_source = driver.page_source or ""
+                    page_title = driver.title or ""
+                    if "401 Authorization Required" in page_source or "401 Authorization Required" in page_title:
+                        logger.warn(f'Multiplayer: Game {game_name} ({appid}) Fix Repair returned 401 - no longer supported')
+                        _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'Online-fix.me no longer has fix files for this game (401 unauthorized)'})
+                        return
+                except Exception:
+                    pass
             except Exception:
                 pass
             
@@ -1421,6 +1455,17 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
                         break
                     except Exception:
                         pass
+        else:
+            # No Fix Repair link found - check if the page itself shows 401
+            try:
+                page_source = driver.page_source or ""
+                page_title = driver.title or ""
+                if "401 Authorization Required" in page_source or "401 Authorization Required" in page_title:
+                    logger.warn(f'Multiplayer: Game {game_name} ({appid}) uploads page returned 401 - no longer supported')
+                    _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'Online-fix.me no longer has fix files for this game (401 unauthorized)'})
+                    return
+            except Exception:
+                pass
         
         _set_multiplayer_fix_state(appid, {'status': 'downloading', 'message': 'Waiting for download...'})
         dl = _wait_for_download(temp, max_wait=600, appid=appid)
