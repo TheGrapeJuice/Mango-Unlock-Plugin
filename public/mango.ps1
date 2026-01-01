@@ -192,23 +192,48 @@ function Install-MangoUnlockPlugin {
     $pluginsPath = Join-Path $steamPath "plugins"
     $targetFolder = Join-Path $pluginsPath "MangoUnlock"
     $tempZip = Join-Path $env:TEMP "MangoUnlock.zip"
+    $pluginJsonPath = Join-Path $targetFolder "plugin.json"
 
     if (-not (Test-Path $pluginsPath)) {
         New-Item $pluginsPath -ItemType Directory -Force | Out-Null
         Log-Message "Created plugins folder" $Gray
     }
 
-    if (Test-Path $targetFolder) {
+    # Check if plugin already exists and compare versions
+    $latestVersion = $tag -replace '^v', ''
+    if (Test-Path $pluginJsonPath) {
         try {
-            Remove-Item $targetFolder -Recurse -Force -ErrorAction Stop
-            Log-Message "Removed previous MangoUnlock version" $Yellow
+            $pluginJson = Get-Content $pluginJsonPath -Raw | ConvertFrom-Json
+            $installedVersion = $pluginJson.version
+            Log-Message "Installed version: v$installedVersion" $Cyan
+
+            # Compare versions
+            try {
+                $installedVer = [Version]$installedVersion
+                $latestVer = [Version]$latestVersion
+                
+                if ($installedVer -ge $latestVer) {
+                    Log-Message "MangoUnlock is already up to date (v$installedVersion)" $Green
+                    Log-Message "Skipping update..." $Gray
+                    return
+                } else {
+                    Log-Message "Update available: v$installedVersion -> v$latestVersion" $Yellow
+                }
+            } catch {
+                # If version comparison fails, do string comparison
+                if ($installedVersion -eq $latestVersion) {
+                    Log-Message "MangoUnlock is already up to date (v$installedVersion)" $Green
+                    Log-Message "Skipping update..." $Gray
+                    return
+                } else {
+                    Log-Message "Update available: v$installedVersion -> v$latestVersion" $Yellow
+                }
+            }
         } catch {
-            Log-Message "Cannot update MangoUnlock - files are in use!" $Red
-            Center-Text "Please close any apps using the plugin folder and re-run this script." $Red
-            Center-Text "Press any key to exit..." $Red
-            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-            [Environment]::Exit(1)
+            Log-Message "Could not read installed version - will update" $Yellow
         }
+    } else {
+        Log-Message "MangoUnlock not found - installing fresh" $Yellow
     }
 
     Log-Message "Downloading MangoUnlock $tag..." $Yellow
@@ -220,20 +245,66 @@ function Install-MangoUnlockPlugin {
         return
     }
 
-    Log-Message "Extracting plugin..." $Yellow
+    Log-Message "Extracting plugin (updating files in place)..." $Yellow
     try {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $zip = [System.IO.Compression.ZipFile]::OpenRead($tempZip)
+        $filesUpdated = 0
+        $filesFailed = 0
+        
         foreach ($entry in $zip.Entries) {
             $destPath = Join-Path $targetFolder $entry.FullName
             $destDir = Split-Path $destPath -Parent
-            if (-not (Test-Path $destDir)) { New-Item $destDir -ItemType Directory -Force | Out-Null }
+            
+            # Create directory if needed
+            if (-not (Test-Path $destDir)) { 
+                New-Item $destDir -ItemType Directory -Force | Out-Null 
+            }
+            
+            # Only process files (not directories)
             if ($entry.Name -ne "") {
-                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $destPath, $true)
+                try {
+                    # Extract to a temp file first
+                    $tempFile = Join-Path $env:TEMP ("MangoUnlock_" + [System.IO.Path]::GetRandomFileName())
+                    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $tempFile, $true)
+                    
+                    # Try to move/replace the file
+                    if (Test-Path $destPath) {
+                        try {
+                            # Try to replace the existing file
+                            Move-Item $tempFile $destPath -Force -ErrorAction Stop
+                            $filesUpdated++
+                        } catch {
+                            # File might be in use, try copying instead
+                            try {
+                                Copy-Item $tempFile $destPath -Force -ErrorAction Stop
+                                Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+                                $filesUpdated++
+                            } catch {
+                                Log-Message "Could not update: $($entry.FullName) (file in use)" $Red
+                                Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+                                $filesFailed++
+                            }
+                        }
+                    } else {
+                        # New file, just move it
+                        Move-Item $tempFile $destPath -Force
+                        $filesUpdated++
+                    }
+                } catch {
+                    Log-Message "Failed to extract: $($entry.FullName)" $Red
+                    $filesFailed++
+                }
             }
         }
         $zip.Dispose()
-        Log-Message "MangoUnlock installed/updated successfully!" $Green
+        
+        if ($filesFailed -eq 0) {
+            Log-Message "MangoUnlock installed/updated successfully! ($filesUpdated files)" $Green
+        } else {
+            Log-Message "MangoUnlock updated with warnings: $filesUpdated files OK, $filesFailed files skipped" $Yellow
+            Log-Message "Some files were in use - restart Steam and re-run if needed" $Yellow
+        }
         Log-Message "Location: $targetFolder" $Cyan
     } catch {
         Log-Message "Extraction failed: $_" $Red
