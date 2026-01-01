@@ -199,8 +199,16 @@ function Install-MangoUnlockPlugin {
     }
 
     if (Test-Path $targetFolder) {
-        Remove-Item $targetFolder -Recurse -Force
-        Log-Message "Removed previous MangoUnlock version" $Yellow
+        try {
+            Remove-Item $targetFolder -Recurse -Force -ErrorAction Stop
+            Log-Message "Removed previous MangoUnlock version" $Yellow
+        } catch {
+            Log-Message "Cannot update MangoUnlock - files are in use!" $Red
+            Center-Text "Please close any apps using the plugin folder and re-run this script." $Red
+            Center-Text "Press any key to exit..." $Red
+            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            [Environment]::Exit(1)
+        }
     }
 
     Log-Message "Downloading MangoUnlock $tag..." $Yellow
@@ -269,9 +277,16 @@ if ($millenniumInstalled) {
     Write-Host ""
 
     Log-Message "Setup complete! Enjoy!" $Cyan
-    Center-Text "Window closing in 12 seconds..." $Gray
-    Start-Sleep 12
-    exit
+    $width = $Host.UI.RawUI.WindowSize.Width
+    for ($i = 12; $i -ge 1; $i--) {
+        $msg = "Window closing in $i second" + $(if ($i -ne 1) { "s" } else { "" }) + "..."
+        $padding = [Math]::Max(0, [int](($width - $msg.Length) / 2))
+        $paddedMsg = (" " * $padding) + $Gray + $msg + $Reset + (" " * $padding)
+        Write-Host "`r$paddedMsg" -NoNewline
+        Start-Sleep 1
+    }
+    Write-Host ""
+    [Environment]::Exit(0)
 }
 
 Start-Section "Installing Millennium"
@@ -318,5 +333,13 @@ Center-Text "Please wait patiently and do not close or restart Steam." $Yellow
 Write-Host ""
 
 Log-Message "Everything complete! Enjoy your unlocked Steam!" $Cyan
-Center-Text "Window closing in 12 seconds..." $Gray
-Start-Sleep 12
+$width = $Host.UI.RawUI.WindowSize.Width
+for ($i = 12; $i -ge 1; $i--) {
+    $msg = "Window closing in $i second" + $(if ($i -ne 1) { "s" } else { "" }) + "..."
+    $padding = [Math]::Max(0, [int](($width - $msg.Length) / 2))
+    $paddedMsg = (" " * $padding) + $Gray + $msg + $Reset + (" " * $padding)
+    Write-Host "`r$paddedMsg" -NoNewline
+    Start-Sleep 1
+}
+Write-Host ""
+[Environment]::Exit(0)
