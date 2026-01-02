@@ -5,7 +5,6 @@
     let buttonInserted = false;
     let pollingTimer = null;
     let lastAppId = null;
-    // Update dismissal is now tracked on backend to persist across page navigations
 
     function backendCall(method, payload) {
         return new Promise((resolve, reject) => {
@@ -52,6 +51,7 @@
 .MangoUnlock-button,
 .MangoUnlock-remove-button,
 .MangoUnlock-unavailable,
+.MangoUnlock-request-button,
 .MangoUnlock-multiplayer-button{
     margin-left:6px !important;
 }
@@ -70,6 +70,16 @@
 }
 .MangoUnlock-multiplayer-button:hover{
     background: linear-gradient(to bottom, #6cb93c 0%, #5ba32b 50%, #4a8f24 100%) !important;
+}
+.MangoUnlock-request-button{
+    background: linear-gradient(to bottom, #4a90d9 0%, #3d7ab8 50%, #2f6499 100%) !important;
+}
+.MangoUnlock-request-button:hover{
+    background: linear-gradient(to bottom, #5ba0e9 0%, #4a90d9 50%, #3d7ab8 100%) !important;
+}
+.MangoUnlock-request-button.MangoUnlock-requested{
+    background: linear-gradient(to bottom, #5ba32b 0%, #4a8f24 50%, #3d7a1d 100%) !important;
+    pointer-events: none !important;
 }
 .MangoUnlock-multiplayer-button.MangoUnlock-remove-mode{
     background: linear-gradient(to bottom, #8f4444 0%, #7a3838 50%, #652d2d 100%) !important;
@@ -290,6 +300,7 @@
             '.MangoUnlock-remove-button',
             '.MangoUnlock-restart-button',
             '.MangoUnlock-unavailable',
+            '.MangoUnlock-request-button',
             '.MangoUnlock-multiplayer-button',
         ];
         selectors.forEach((selector) => {
@@ -388,35 +399,70 @@
         unavailableBtn.style.display = '';
         unavailableBtn.style.pointerEvents = 'none';
 
-        // Multiplayer Fix button - only shown for games added via MangoUnlock that have multiplayer
-        // Shows "Remove Fix" if fix is already applied, otherwise "Fix Multiplayer"
         const mpFixBtn = createButton('🔧 Fix Multiplayer', referenceBtn, 'MangoUnlock-multiplayer-button');
         mpFixBtn.dataset.appid = String(appid);
         mpFixBtn.style.display = 'none';
         mpFixBtn.onclick = function(e){
             e.preventDefault();
             if (state.mpFixApplied) {
-                // Remove the fix
                 showConfirmModal('Remove Multiplayer Fix', 
                     'Are you sure you want to remove the multiplayer fix? This will restore the original game files.',
                     function() {
                         removeMultiplayerFix(appid, container);
                     });
             } else {
-                // Apply the fix
                 startMultiplayerFix(appid, container);
             }
+        };
+
+        const requestBtn = createButton('📩 Request Game', referenceBtn, 'MangoUnlock-request-button');
+        requestBtn.dataset.appid = String(appid);
+        requestBtn.style.display = 'none';
+        requestBtn.onclick = function(e){
+            e.preventDefault();
+            if (requestBtn.classList.contains('MangoUnlock-requested')) {
+                return;
+            }
+            const requestSpan = requestBtn.querySelector('span');
+            requestSpan.textContent = '📩 Requesting...';
+            requestBtn.classList.add('MangoUnlock-disabled');
+            backendCall('RequestGame', { appid, contentScriptQuery: '' }).then((res) => {
+                const payload = typeof res === 'string' ? JSON.parse(res) : res;
+                if (payload && payload.success) {
+                    const msg = payload.message || 'Game Requested';
+                    requestSpan.textContent = '✅ ' + msg;
+                    requestBtn.classList.remove('MangoUnlock-disabled');
+                    requestBtn.classList.add('MangoUnlock-requested');
+                    state.requested = true;
+                    state.requestMessage = msg;
+                } else {
+                    const errorMsg = payload.error || 'Request Failed';
+                    requestSpan.textContent = '❌ ' + errorMsg;
+                    requestBtn.classList.remove('MangoUnlock-disabled');
+                    requestBtn.classList.add('MangoUnlock-requested');
+                    state.requested = true;
+                    state.requestMessage = errorMsg;
+                }
+            }).catch((err) => {
+                console.warn('[MangoUnlock] Request game failed', err);
+                requestSpan.textContent = '❌ Request Failed';
+                requestBtn.classList.remove('MangoUnlock-disabled');
+                requestBtn.classList.add('MangoUnlock-requested');
+                state.requested = true;
+            });
         };
 
         container.appendChild(restartBtn);
         container.appendChild(addBtn);
         container.appendChild(removeBtn);
         container.appendChild(unavailableBtn);
+        container.appendChild(requestBtn);
         container.appendChild(mpFixBtn);
 
         const addSpan = addBtn.querySelector('span');
         const unavailableSpan = unavailableBtn.querySelector('span');
         const mpFixSpan = mpFixBtn.querySelector('span');
+        const requestSpan = requestBtn.querySelector('span');
         const state = {
             exists: null,
             available: null,
@@ -426,20 +472,21 @@
             message: null,
             hasMultiplayer: null,
             mpFixApplied: false,
+            requested: false,
+            requestMessage: null,
         };
 
         function render() {
             addBtn.style.display = 'none';
             removeBtn.style.display = 'none';
             unavailableBtn.style.display = 'none';
+            requestBtn.style.display = 'none';
             mpFixBtn.style.display = 'none';
 
             if (state.exists === true) {
                 removeBtn.style.display = '';
-                // Show multiplayer fix button if game was added AND has multiplayer
                 if (state.hasMultiplayer === true) {
                     mpFixBtn.style.display = '';
-                    // Update button text and style based on whether fix is applied
                     if (state.mpFixApplied) {
                         mpFixSpan.textContent = '🔧 Remove Fix';
                         mpFixBtn.title = 'Remove the multiplayer fix and restore original files';
@@ -475,8 +522,11 @@
             }
 
             if (state.available === false) {
-                unavailableSpan.textContent = 'Game not available';
-                unavailableBtn.style.display = '';
+                if (state.requested) {
+                    requestSpan.textContent = state.requestMessage ? ('✅ ' + state.requestMessage) : '✅ Game Requested';
+                    requestBtn.classList.add('MangoUnlock-requested');
+                }
+                requestBtn.style.display = '';
                 return;
             }
 
@@ -495,16 +545,12 @@
             state.mpFixApplied = false;
             render();
 
-            // DLCs are fetched on-demand when user clicks Add - no prefetching needed
-
             backendCall('HasMangoUnlockForApp', { appid, contentScriptQuery: '' }).then((res) => {
                 const payload = typeof res === 'string' ? JSON.parse(res) : res;
                 state.exists = !!(payload && payload.success && payload.exists);
                 render();
                 
-                // If game exists in MangoUnlock, check if it has multiplayer
                 if (state.exists) {
-                    // Check multiplayer capability
                     backendCall('CheckGameHasMultiplayer', { appid: appid }).then((mpRes) => {
                         try {
                             const mpPayload = typeof mpRes === 'string' ? JSON.parse(mpRes) : mpRes;
@@ -512,7 +558,6 @@
                                 state.hasMultiplayer = !!mpPayload.has_multiplayer;
                                 render();
                                 
-                                // Also check if multiplayer fix is already applied
                                 if (state.hasMultiplayer) {
                                     backendCall('IsMultiplayerFixApplied', { appid: appid }).then((fixRes) => {
                                         try {
@@ -549,6 +594,9 @@
                     state.indeterminate = !!payload.indeterminate;
                     state.message = payload.message || null;
                     state.availabilityError = null;
+                    if (payload.isp_blocked) {
+                        state.availabilityError = 'ISP blocking connection. Try VPN or change DNS.';
+                    }
                 } else {
                     state.available = null;
                     state.availabilityError = (payload && payload.error) ? String(payload.error) : 'Availability check failed';
@@ -612,15 +660,13 @@
         }
     }
 
-    // ==================== AUTO-UPDATE FUNCTIONS ====================
-    
-    let updateCheckDone = false;
+    let updateCheckDone = sessionStorage.getItem('MangoUnlock_updateCheckDone') === 'true';
     
     function checkForUpdates() {
         if (updateCheckDone) return;
         updateCheckDone = true;
+        sessionStorage.setItem('MangoUnlock_updateCheckDone', 'true');
         
-        // First check if user already dismissed update this session (backend tracks this)
         backendCall('IsUpdateDismissed', {}).then(function(res) {
             try {
                 const payload = typeof res === 'string' ? JSON.parse(res) : res;
@@ -632,12 +678,11 @@
                 console.warn('[MangoUnlock] IsUpdateDismissed parse error', err);
             }
             
-            // Check if there's a pending message from a previous update check
             backendCall('GetUpdateMessage', {}).then(function(res) {
                 try {
                     const payload = typeof res === 'string' ? JSON.parse(res) : res;
                     if (payload && payload.dismissed) {
-                        return; // Already dismissed
+                        return;
                     }
                     if (payload && payload.success && payload.message) {
                         const msg = String(payload.message);
@@ -648,12 +693,11 @@
                     console.warn('[MangoUnlock] GetUpdateMessage parse error', err);
                 }
                 
-                // If no pending message, trigger a check now
                 backendCall('CheckForUpdatesNow', {}).then(function(res2) {
                     try {
                         const payload2 = typeof res2 === 'string' ? JSON.parse(res2) : res2;
                         if (payload2 && payload2.dismissed) {
-                            return; // Already dismissed
+                            return;
                         }
                         if (payload2 && payload2.success && payload2.message) {
                             const msg2 = String(payload2.message);
@@ -674,14 +718,10 @@
     }
     
     function showUpdateNotification(message) {
-        // Check if this is an update message
         const isUpdateMsg = message.toLowerCase().includes('update') || message.toLowerCase().includes('available');
         
         if (isUpdateMsg) {
-            // Show confirm dialog with Update (restart) and Later options
             showUpdateConfirmModal('MangoUnlock Update', message, function() {
-                // User clicked Update Now - download, extract, then restart Steam
-                // Show a loading overlay while downloading
                 const loadingOverlay = showOverlay('Downloading update...');
                 
                 backendCall('DownloadAndApplyUpdate', {}).then(function(res) {
@@ -689,7 +729,6 @@
                         const payload = typeof res === 'string' ? JSON.parse(res) : res;
                         if (payload && payload.success) {
                             loadingOverlay.body.textContent = 'Update installed! Restarting Steam...';
-                            // Now restart Steam
                             setTimeout(function() {
                                 backendCall('RestartSteam', {}).catch(function(err) {
                                     console.warn('[MangoUnlock] RestartSteam failed', err);
@@ -707,7 +746,6 @@
                     console.warn('[MangoUnlock] DownloadAndApplyUpdate failed', err);
                 });
             }, function() {
-                // User clicked Later - tell backend to not prompt again this session
                 backendCall('DismissUpdate', {}).then(function() {
                     console.log('[MangoUnlock] Update dismissed on backend, will not prompt again until Steam restart');
                 }).catch(function(err) {
@@ -715,14 +753,9 @@
                 });
             });
         } else {
-            // Just show an info overlay
             showOverlay(message);
         }
     }
-    
-    // ==================== END AUTO-UPDATE FUNCTIONS ====================
-
-    // ==================== MULTIPLAYER FIX FUNCTIONS ====================
 
     function showCredentialsModal(onSave) {
         const overlay = document.createElement('div');
@@ -776,7 +809,6 @@
                 info.textContent = 'Please enter both username and password.';
                 return;
             }
-            // Save credentials via backend
             backendCall('SaveMultiplayerCredentials', { username: username, password: password }).then(function(res) {
                 try {
                     const payload = typeof res === 'string' ? JSON.parse(res) : res;
@@ -900,12 +932,10 @@
                                 clearInterval(pollInterval);
                                 pollInterval = null;
                             }
-                            // Refresh buttons to show "Remove Fix" option
                             setTimeout(function() {
                                 refreshButtons(appid);
                             }, 500);
                         } else if (statusText === 'login_required') {
-                            // Login timed out - show credentials modal
                             if (pollInterval) {
                                 clearInterval(pollInterval);
                                 pollInterval = null;
@@ -930,10 +960,8 @@
                             }
                             
                             if (isCredentialError) {
-                                // Close progress overlay and show credentials modal
                                 overlay.remove();
                                 showCredentialsModal(function() {
-                                    // Retry after saving new credentials
                                     startMultiplayerFix(appid, null);
                                 });
                             } else {
@@ -965,7 +993,6 @@
                 if (payload && payload.success) {
                     showMultiplayerProgress(appid);
                 } else if (payload && payload.need_credentials) {
-                    // Show credentials modal, then retry
                     showCredentialsModal(function() {
                         startMultiplayerFix(appid, container);
                     });
@@ -982,7 +1009,6 @@
     }
 
     function removeMultiplayerFix(appid, container) {
-        // Show a loading overlay
         const overlay = showOverlay('Removing multiplayer fix...');
         
         backendCall('RemoveMultiplayerFix', { appid: appid }).then(function(res) {
@@ -996,15 +1022,12 @@
                     overlay.body.textContent = 'Error: ' + errorMsg;
                     overlay.body.style.color = '#c94a4a';
                 }
-                // Always refresh buttons after remove attempt (success or failure)
-                // This ensures the button goes back to "Fix Multiplayer" if the log was cleaned up
                 setTimeout(function() {
                     refreshButtons(appid);
                 }, 1000);
             } catch (err) {
                 overlay.body.textContent = 'Error: ' + err.message;
                 overlay.body.style.color = '#c94a4a';
-                // Still refresh on parse error
                 setTimeout(function() {
                     refreshButtons(appid);
                 }, 1000);
@@ -1012,14 +1035,11 @@
         }).catch(function(err) {
             overlay.body.textContent = 'Error: ' + err.message;
             overlay.body.style.color = '#c94a4a';
-            // Still refresh on network error
             setTimeout(function() {
                 refreshButtons(appid);
             }, 1000);
         });
     }
-
-    // ==================== END MULTIPLAYER FIX FUNCTIONS ====================
 
     function init() {
         ensureButtons();
@@ -1031,7 +1051,6 @@
         }
         setInterval(ensureButtons, 2000);
         
-        // Check for updates after a short delay to let UI load first
         setTimeout(checkForUpdates, 3000);
     }
 

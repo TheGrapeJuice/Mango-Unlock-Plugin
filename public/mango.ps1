@@ -1,8 +1,7 @@
 cls
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-# Vibrant ANSI Colors
-$Orange = "$([char]0x1b)[38;2;255;165;0m"  # Mango orange
+$Orange = "$([char]0x1b)[38;2;255;165;0m"
 $Cyan   = "$([char]0x1b)[96m"
 $Yellow = "$([char]0x1b)[93m"
 $Green  = "$([char]0x1b)[92m"
@@ -10,7 +9,6 @@ $Red    = "$([char]0x1b)[91m"
 $Gray   = "$([char]0x1b)[90m"
 $Reset  = "$([char]0x1b)[0m"
 
-# Your original MANGO ASCII banner - EXACTLY as you gave it
 $RawBanner = @"
 __/\\\\____________/\\\\_____/\\\\\\\\\_____/\\\\\_____/\\\_____/\\\\\\\\\\\\_______/\\\\\______
  _\/\\\\\\________/\\\\\\___/\\\\\\\\\\\\\__\/\\\\\\___\/\\\___/\\\//////////______/\\\///\\\____
@@ -148,7 +146,6 @@ try {
     Log-Message "Added Windows Defender exclusion for xinput1_4.dll" $Gray
 } catch {}
 
-# Create mangoplugin folder for multiplayer fix downloads and add exclusion
 $mangoPluginPath = Join-Path $env:APPDATA "mangoplugin"
 if (-not (Test-Path $mangoPluginPath)) {
     New-Item $mangoPluginPath -ItemType Directory -Force | Out-Null
@@ -210,7 +207,6 @@ function Install-MangoUnlockPlugin {
         Log-Message "Created plugins folder" $Gray
     }
 
-    # Check if plugin already exists and compare versions
     $latestVersion = $tag -replace '^v', ''
     if (Test-Path $pluginJsonPath) {
         try {
@@ -218,7 +214,6 @@ function Install-MangoUnlockPlugin {
             $installedVersion = $pluginJson.version
             Log-Message "Installed version: v$installedVersion" $Cyan
 
-            # Compare versions
             try {
                 $installedVer = [Version]$installedVersion
                 $latestVer = [Version]$latestVersion
@@ -231,7 +226,6 @@ function Install-MangoUnlockPlugin {
                     Log-Message "Update available: v$installedVersion -> v$latestVersion" $Yellow
                 }
             } catch {
-                # If version comparison fails, do string comparison
                 if ($installedVersion -eq $latestVersion) {
                     Log-Message "MangoUnlock is already up to date (v$installedVersion)" $Green
                     Log-Message "Skipping update..." $Gray
@@ -267,26 +261,20 @@ function Install-MangoUnlockPlugin {
             $destPath = Join-Path $targetFolder $entry.FullName
             $destDir = Split-Path $destPath -Parent
             
-            # Create directory if needed
             if (-not (Test-Path $destDir)) { 
                 New-Item $destDir -ItemType Directory -Force | Out-Null 
             }
             
-            # Only process files (not directories)
             if ($entry.Name -ne "") {
                 try {
-                    # Extract to a temp file first
                     $tempFile = Join-Path $env:TEMP ("MangoUnlock_" + [System.IO.Path]::GetRandomFileName())
                     [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $tempFile, $true)
                     
-                    # Try to move/replace the file
                     if (Test-Path $destPath) {
                         try {
-                            # Try to replace the existing file
                             Move-Item $tempFile $destPath -Force -ErrorAction Stop
                             $filesUpdated++
                         } catch {
-                            # File might be in use, try copying instead
                             try {
                                 Copy-Item $tempFile $destPath -Force -ErrorAction Stop
                                 Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
@@ -298,7 +286,6 @@ function Install-MangoUnlockPlugin {
                             }
                         }
                     } else {
-                        # New file, just move it
                         Move-Item $tempFile $destPath -Force
                         $filesUpdated++
                     }

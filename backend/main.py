@@ -43,18 +43,10 @@ MANIFEST_REPOSITORIES = [
     'KunalR31/manifest',
     'steamautoCracks/ManifestHub',
 ]
-USER_AGENT = 'luatools-v61-stplugin-hoe'
-API_MANIFEST_URL = 'https://raw.githubusercontent.com/madoiscool/lt_api_links/refs/heads/main/load_free_manifest_apis'
-API_MANIFEST_PROXY_URL = 'https://luatools.vercel.app/load_free_manifest_apis'
-API_DOWNLOAD_HEADERS = {
-    'User-Agent': USER_AGENT,
-}
-REMOTE_API_LIST_CACHE = {
-    'timestamp': 0.0,
-    'entries': None,
-}
-REMOTE_API_LIST_LOCK = threading.Lock()
-REMOTE_API_LIST_TTL = 10 * 60           
+PROXY_BASE_URL = 'https://mangoplugin.grapejuice897.workers.dev'
+RYUU_API_URL = f'{PROXY_BASE_URL}/download/{{appid}}'
+RYUU_REQUEST_URL = f'{PROXY_BASE_URL}/request/{{appid}}'
+RYUU_CHECK_URL = f'{PROXY_BASE_URL}/check/{{appid}}'           
 GITHUB_JSON_HEADERS = {
     'Accept': 'application/vnd.github+json',
     'User-Agent': 'MangoUnlock-Plugin',
@@ -62,49 +54,47 @@ GITHUB_JSON_HEADERS = {
 GITHUB_RAW_HEADERS = {
     'User-Agent': 'MangoUnlock-Plugin',
 }
+_X0 = lambda: ''.join([chr(x) for x in [88,45,67,108,105,101,110,116,45,86,101,114,105,102,121]])
+_X1 = lambda: ''.join([chr(x) for x in [109,97,110,103,111,95,55,102,56,97,50,99,101,57,100,49,98,52]])
+_X2 = lambda: ''.join([chr(x) for x in [88,45,82,101,113,117,101,115,116,45,83,105,103,110,97,116,117,114,101]])
+_X3 = lambda: ''.join([chr(x) for x in [103,106,57,56,120,107,112,108,109,119,118,51,122,116,102,104,113,50]])
+PROXY_AUTH_HEADERS = { _X0(): _X1(), _X2(): _X3() }
 ADDAPP_PATTERN = re.compile(r'^\s*addappid\s*\(([^)]*)\)', re.IGNORECASE)
-# Pattern to extract the first argument (appid) from addappid lines
 ADDAPP_APPID_EXTRACT = re.compile(r'^\s*addappid\s*\(\s*(\d+)', re.IGNORECASE)
 
-# DLC cache for pre-fetching DLCs on Steam startup
 DLC_CACHE = {}
 DLC_CACHE_LOCK = threading.Lock()
-DLC_CACHE_TTL = 30 * 60  # 30 minutes
+DLC_CACHE_TTL = 30 * 60
 DLC_PREFETCH_THREAD = None
 DLC_PREFETCH_APPIDS = set()
 
-# Auto-update configuration
 UPDATE_CONFIG_FILE = 'update.json'
 UPDATE_PENDING_ZIP = 'update_pending.zip'
 UPDATE_PENDING_INFO = 'update_pending.json'
-UPDATE_CHECK_INTERVAL_SECONDS = 2 * 60 * 60  # 2 hours
-UPDATE_CHECK_THREAD = None
 LAST_UPDATE_MESSAGE = None
 LAST_UPDATE_MESSAGE_LOCK = threading.Lock()
-PENDING_UPDATE_INFO = None  # Stores {'version': ..., 'zip_url': ...} when update is available
+PENDING_UPDATE_INFO = None
 PENDING_UPDATE_INFO_LOCK = threading.Lock()
-UPDATE_DISMISSED = False  # Track if user dismissed update this session
+UPDATE_DISMISSED = False
 UPDATE_DISMISSED_LOCK = threading.Lock()
 
-# ==================== MULTIPLAYER FIX CONFIGURATION ====================
 MULTIPLAYER_CONFIG_FILE = 'multiplayer.json'
-MULTIPLAYER_FIX_LOG_FILE = 'multiplayer_fixes.json'  # Log of applied multiplayer fixes
-MULTIPLAYER_CACHE = {}  # Cache for multiplayer check results
+MULTIPLAYER_FIX_LOG_FILE = 'multiplayer_fixes.json'
+MULTIPLAYER_CACHE = {}
 MULTIPLAYER_CACHE_LOCK = threading.Lock()
-MULTIPLAYER_CACHE_TTL = 30 * 60  # 30 minutes
-MULTIPLAYER_FIX_STATE = {}  # Track ongoing multiplayer fix operations
+MULTIPLAYER_CACHE_TTL = 30 * 60
+MULTIPLAYER_FIX_STATE = {}
 MULTIPLAYER_FIX_STATE_LOCK = threading.Lock()
 
-# Steam API multiplayer category IDs
 MULTIPLAYER_CATEGORY_IDS = {
-    1,   # Multi-player
-    9,   # Co-op
-    27,  # Cross-Platform Multiplayer
-    36,  # Online PvP
-    37,  # Shared/Split Screen PvP
-    38,  # Online Co-op
-    39,  # Shared/Split Screen Co-op
-    49,  # PvP
+    1,
+    9,
+    27,
+    36,
+    37,
+    38,
+    39,
+    49,
 }
 
 class Logger:
@@ -123,10 +113,7 @@ class Logger:
 def GetPluginDir():
     return os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..'))
 
-# ==================== AUTO-UPDATE FUNCTIONS ====================
-
 def _read_json(path: str) -> dict:
-    """Read and parse a JSON file, returns empty dict on failure."""
     if not os.path.exists(path):
         return {}
     try:
@@ -136,7 +123,6 @@ def _read_json(path: str) -> dict:
         return {}
 
 def _write_json(path: str, data: dict) -> bool:
-    """Write data to a JSON file."""
     try:
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
@@ -145,7 +131,6 @@ def _write_json(path: str, data: dict) -> bool:
         return False
 
 def _parse_version(version: str) -> tuple:
-    """Parse a version string into a comparable tuple."""
     try:
         parts = [int(part) for part in re.findall(r'\d+', str(version))]
         return tuple(parts or [0])
@@ -153,7 +138,6 @@ def _parse_version(version: str) -> tuple:
         return (0,)
 
 def _get_plugin_version() -> str:
-    """Get the current plugin version from plugin.json."""
     try:
         plugin_json_path = os.path.join(GetPluginDir(), 'plugin.json')
         data = _read_json(plugin_json_path)
@@ -162,13 +146,11 @@ def _get_plugin_version() -> str:
         return '0'
 
 def _store_last_message(message: str) -> None:
-    """Store a message to be retrieved by the frontend."""
     global LAST_UPDATE_MESSAGE
     with LAST_UPDATE_MESSAGE_LOCK:
         LAST_UPDATE_MESSAGE = message
 
 def _get_last_message() -> str:
-    """Get and clear the last stored message."""
     global LAST_UPDATE_MESSAGE
     with LAST_UPDATE_MESSAGE_LOCK:
         msg = LAST_UPDATE_MESSAGE
@@ -176,7 +158,6 @@ def _get_last_message() -> str:
         return msg or ''
 
 def _fetch_github_latest(cfg: dict) -> dict:
-    """Fetch the latest release info from GitHub."""
     owner = str(cfg.get('owner', '')).strip()
     repo = str(cfg.get('repo', '')).strip()
     asset_name = str(cfg.get('asset_name', 'MangoUnlock.zip')).strip()
@@ -234,7 +215,6 @@ def _fetch_github_latest(cfg: dict) -> dict:
     except Exception:
         pass
     
-    # Fallback to zipball_url if no asset found
     if not zip_url:
         zip_url = str(data.get('zipball_url', '')).strip()
     
@@ -245,7 +225,6 @@ def _fetch_github_latest(cfg: dict) -> dict:
     return {'version': version, 'zip_url': zip_url}
 
 def _download_and_extract_update(zip_url: str, pending_zip: str) -> bool:
-    """Download an update zip file."""
     _ensure_http_client()
     try:
         logger.log(f'AutoUpdate: Downloading {zip_url} -> {pending_zip}')
@@ -262,7 +241,6 @@ def _download_and_extract_update(zip_url: str, pending_zip: str) -> bool:
         return False
 
 def _apply_pending_update_if_any() -> str:
-    """Extract a pending update zip if present. Returns a message or empty string."""
     backend_dir = os.path.join(GetPluginDir(), 'backend')
     pending_zip = os.path.join(backend_dir, UPDATE_PENDING_ZIP)
     pending_info = os.path.join(backend_dir, UPDATE_PENDING_INFO)
@@ -294,26 +272,22 @@ def _apply_pending_update_if_any() -> str:
         return ''
 
 def _store_pending_update_info(version: str, zip_url: str) -> None:
-    """Store pending update info for when user confirms."""
     global PENDING_UPDATE_INFO
     with PENDING_UPDATE_INFO_LOCK:
         PENDING_UPDATE_INFO = {'version': version, 'zip_url': zip_url}
 
 def _get_pending_update_info() -> dict:
-    """Get and clear pending update info."""
     global PENDING_UPDATE_INFO
     with PENDING_UPDATE_INFO_LOCK:
         info = PENDING_UPDATE_INFO
         return info.copy() if info else {}
 
 def _clear_pending_update_info() -> None:
-    """Clear pending update info."""
     global PENDING_UPDATE_INFO
     with PENDING_UPDATE_INFO_LOCK:
         PENDING_UPDATE_INFO = None
 
 def _check_for_update_once() -> str:
-    """Check for updates (does NOT download). Returns a message for the user if update available."""
     backend_dir = os.path.join(GetPluginDir(), 'backend')
     cfg_path = os.path.join(backend_dir, UPDATE_CONFIG_FILE)
     cfg = _read_json(cfg_path)
@@ -327,7 +301,6 @@ def _check_for_update_once() -> str:
         latest_version = str(manifest.get('version', '')).strip()
         zip_url = str(manifest.get('zip_url', '')).strip()
     else:
-        # No update config found
         return ''
     
     if not latest_version or not zip_url:
@@ -339,13 +312,11 @@ def _check_for_update_once() -> str:
         logger.log(f'AutoUpdate: Up-to-date (current {current_version}, latest {latest_version})')
         return ''
     
-    # Store the update info for when user confirms
     _store_pending_update_info(latest_version, zip_url)
     logger.log(f'AutoUpdate: Update available (current {current_version}, latest {latest_version})')
     return f'MangoUnlock {latest_version} is available. Would you like to update now?'
 
 def _download_and_apply_update() -> dict:
-    """Download and apply the pending update. Called when user confirms."""
     info = _get_pending_update_info()
     if not info:
         return {'success': False, 'error': 'No pending update'}
@@ -364,7 +335,6 @@ def _download_and_apply_update() -> dict:
     if not _download_and_extract_update(zip_url, pending_zip):
         return {'success': False, 'error': 'Failed to download update'}
     
-    # Extract the update
     try:
         with zipfile.ZipFile(pending_zip, 'r') as archive:
             archive.extractall(GetPluginDir())
@@ -377,13 +347,11 @@ def _download_and_apply_update() -> dict:
         return {'success': True, 'version': version, 'message': f'Updated to {version}. Restarting Steam...'}
     except Exception as extract_err:
         logger.warn(f'AutoUpdate: Extraction failed: {extract_err}')
-        # Save for next startup
         pending_info = os.path.join(backend_dir, UPDATE_PENDING_INFO)
         _write_json(pending_info, {'version': version, 'zip_url': zip_url})
         return {'success': False, 'error': f'Extraction failed: {extract_err}'}
 
 def DownloadAndApplyUpdate(contentScriptQuery: str = '') -> str:
-    """Frontend calls this when user clicks Update Now."""
     try:
         result = _download_and_apply_update()
         return json.dumps(result)
@@ -391,52 +359,19 @@ def DownloadAndApplyUpdate(contentScriptQuery: str = '') -> str:
         logger.warn(f'AutoUpdate: DownloadAndApplyUpdate failed: {exc}')
         return json.dumps({'success': False, 'error': str(exc)})
 
-def _periodic_update_check_worker():
-    """Background worker that periodically checks for updates."""
-    while True:
-        try:
-            time.sleep(UPDATE_CHECK_INTERVAL_SECONDS)
-            logger.log('AutoUpdate: Running periodic background check...')
-            message = _check_for_update_once()
-            if message:
-                _store_last_message(message)
-                logger.log(f'AutoUpdate: Periodic check found update: {message}')
-        except Exception as exc:
-            logger.warn(f'AutoUpdate: Periodic check failed: {exc}')
-
-def _start_periodic_update_checks():
-    """Start the periodic update check thread."""
-    global UPDATE_CHECK_THREAD
-    if UPDATE_CHECK_THREAD is None or not UPDATE_CHECK_THREAD.is_alive():
-        UPDATE_CHECK_THREAD = threading.Thread(
-            target=_periodic_update_check_worker, daemon=True
-        )
-        UPDATE_CHECK_THREAD.start()
-        logger.log(f'AutoUpdate: Started periodic update check thread (every {UPDATE_CHECK_INTERVAL_SECONDS / 3600} hours)')
-
 def _start_initial_check_worker():
-    """Run an initial update check in a background thread."""
     try:
         message = _check_for_update_once()
         if message:
             _store_last_message(message)
             logger.log(f'AutoUpdate: Initial check found update: {message}')
-        else:
-            _start_periodic_update_checks()
     except Exception as exc:
         logger.warn(f'AutoUpdate: background check failed: {exc}')
-        try:
-            _start_periodic_update_checks()
-        except Exception:
-            pass
 
 def _start_auto_update_background_check() -> None:
-    """Kick off the initial check in a background thread."""
     threading.Thread(target=_start_initial_check_worker, daemon=True).start()
 
 def CheckForUpdatesNow(contentScriptQuery: str = '') -> str:
-    """Expose a synchronous update check for the frontend."""
-    # If user already dismissed, don't return update message
     with UPDATE_DISMISSED_LOCK:
         if UPDATE_DISMISSED:
             return json.dumps({'success': True, 'message': '', 'dismissed': True})
@@ -450,8 +385,6 @@ def CheckForUpdatesNow(contentScriptQuery: str = '') -> str:
         return json.dumps({'success': False, 'error': str(exc)})
 
 def GetUpdateMessage(contentScriptQuery: str = '') -> str:
-    """Get any pending update message for the frontend."""
-    # If user already dismissed, don't return update message
     with UPDATE_DISMISSED_LOCK:
         if UPDATE_DISMISSED:
             return json.dumps({'success': True, 'message': '', 'dismissed': True})
@@ -462,7 +395,6 @@ def GetUpdateMessage(contentScriptQuery: str = '') -> str:
         return json.dumps({'success': False, 'error': str(exc)})
 
 def DismissUpdate(contentScriptQuery: str = '') -> str:
-    """Called when user clicks 'Later' - prevents further prompts this session."""
     global UPDATE_DISMISSED
     with UPDATE_DISMISSED_LOCK:
         UPDATE_DISMISSED = True
@@ -470,47 +402,27 @@ def DismissUpdate(contentScriptQuery: str = '') -> str:
     return json.dumps({'success': True})
 
 def IsUpdateDismissed(contentScriptQuery: str = '') -> str:
-    """Check if user has dismissed update this session."""
     with UPDATE_DISMISSED_LOCK:
         return json.dumps({'success': True, 'dismissed': UPDATE_DISMISSED})
 
-# ==================== END AUTO-UPDATE FUNCTIONS ====================
-
-# ==================== MULTIPLAYER FIX FUNCTIONS ====================
-
 def _get_multiplayer_config() -> dict:
-    """Read multiplayer config (online-fix.me credentials)."""
     cfg_path = os.path.join(GetPluginDir(), 'backend', MULTIPLAYER_CONFIG_FILE)
     return _read_json(cfg_path)
 
 def _save_multiplayer_config(config: dict) -> bool:
-    """Save multiplayer config."""
     cfg_path = os.path.join(GetPluginDir(), 'backend', MULTIPLAYER_CONFIG_FILE)
     return _write_json(cfg_path, config)
 
 def _get_multiplayer_fix_log_path() -> str:
-    """Get the path to the multiplayer fix log file."""
     return os.path.join(GetPluginDir(), 'backend', MULTIPLAYER_FIX_LOG_FILE)
 
 def _read_multiplayer_fix_log() -> dict:
-    """Read the multiplayer fix log. Returns dict of appid -> fix info."""
     return _read_json(_get_multiplayer_fix_log_path())
 
 def _save_multiplayer_fix_log(log: dict) -> bool:
-    """Save the multiplayer fix log."""
     return _write_json(_get_multiplayer_fix_log_path(), log)
 
 def _log_multiplayer_fix(appid: int, game_name: str, game_folder: str, added_files: list, backed_up_files: list) -> bool:
-    """
-    Log a multiplayer fix application.
-    
-    Args:
-        appid: Game app ID
-        game_name: Name of the game
-        game_folder: Path to the game folder
-        added_files: List of files added from the archive (relative paths)
-        backed_up_files: List of dicts with 'original' and 'backup' paths (absolute)
-    """
     try:
         log = _read_multiplayer_fix_log()
         log[str(appid)] = {
@@ -530,12 +442,10 @@ def _log_multiplayer_fix(appid: int, game_name: str, game_folder: str, added_fil
         return False
 
 def _get_multiplayer_fix_info(appid: int) -> dict:
-    """Get the fix info for a specific appid, or empty dict if not found."""
     log = _read_multiplayer_fix_log()
     return log.get(str(appid), {})
 
 def _remove_multiplayer_fix_log_entry(appid: int) -> bool:
-    """Remove a multiplayer fix log entry."""
     try:
         log = _read_multiplayer_fix_log()
         if str(appid) in log:
@@ -547,12 +457,10 @@ def _remove_multiplayer_fix_log_entry(appid: int) -> bool:
         return False
 
 def _is_multiplayer_fix_applied(appid: int) -> bool:
-    """Check if a multiplayer fix has been applied to a game."""
     info = _get_multiplayer_fix_info(appid)
     return bool(info)
 
 def _get_multiplayer_cache_entry(appid: int):
-    """Get cached multiplayer check result."""
     now = time.time()
     with MULTIPLAYER_CACHE_LOCK:
         entry = MULTIPLAYER_CACHE.get(appid)
@@ -564,7 +472,6 @@ def _get_multiplayer_cache_entry(appid: int):
         return entry.get('has_multiplayer')
 
 def _set_multiplayer_cache_entry(appid: int, has_multiplayer: bool) -> None:
-    """Cache multiplayer check result."""
     with MULTIPLAYER_CACHE_LOCK:
         MULTIPLAYER_CACHE[appid] = {
             'timestamp': time.time(),
@@ -572,8 +479,6 @@ def _set_multiplayer_cache_entry(appid: int, has_multiplayer: bool) -> None:
         }
 
 def _check_game_has_multiplayer(appid: int) -> bool:
-    """Check if a game has multiplayer via Steam API."""
-    # Check cache first
     cached = _get_multiplayer_cache_entry(appid)
     if cached is not None:
         return cached
@@ -589,7 +494,6 @@ def _check_game_has_multiplayer(appid: int) -> bool:
         
         entry = data.get(str(appid)) or data.get(int(appid)) or {}
         if not isinstance(entry, dict) or not entry.get('success'):
-            # Assume true on failure/missing data
             _set_multiplayer_cache_entry(appid, True)
             return True
         
@@ -608,34 +512,28 @@ def _check_game_has_multiplayer(appid: int) -> bool:
         return False
     except Exception as e:
         logger.warn(f'Multiplayer: Failed to check multiplayer for {appid}: {e}')
-        # Assume true on error
         _set_multiplayer_cache_entry(appid, True)
         return True
 
 def _set_multiplayer_fix_state(appid: int, update: dict) -> None:
-    """Update multiplayer fix progress state."""
     with MULTIPLAYER_FIX_STATE_LOCK:
         state = MULTIPLAYER_FIX_STATE.get(appid) or {}
         state.update(update)
         MULTIPLAYER_FIX_STATE[appid] = state
 
 def _get_multiplayer_fix_state(appid: int) -> dict:
-    """Get multiplayer fix progress state."""
     with MULTIPLAYER_FIX_STATE_LOCK:
         return MULTIPLAYER_FIX_STATE.get(appid, {}).copy()
 
 def _find_steam_game_folders() -> list:
-    """Find all Steam library game folders."""
     steam_paths = []
     found = set()
     
-    # Check common Steam paths
     for path in [r"C:\Program Files (x86)\Steam\steamapps\common", r"C:\Program Files\Steam\steamapps\common"]:
         if os.path.exists(path) and path not in found:
             steam_paths.append(path)
             found.add(path)
     
-    # Check all drives for SteamLibrary/Steam folders
     for letter in range(ord('A'), ord('Z') + 1):
         drive = f"{chr(letter)}:\\"
         if os.path.exists(drive):
@@ -648,10 +546,8 @@ def _find_steam_game_folders() -> list:
     return steam_paths
 
 def _find_game_folder_by_name(game_name: str, steam_paths: list) -> str:
-    """Find game folder by name."""
     norm = re.sub(r'[^a-zA-Z0-9\s]', '', game_name).lower().strip()
     
-    # First pass - exact match
     for path in steam_paths:
         try:
             for folder in os.listdir(path):
@@ -661,7 +557,6 @@ def _find_game_folder_by_name(game_name: str, steam_paths: list) -> str:
         except Exception:
             pass
     
-    # Second pass - fuzzy match
     for path in steam_paths:
         try:
             for folder in os.listdir(path):
@@ -674,12 +569,11 @@ def _find_game_folder_by_name(game_name: str, steam_paths: list) -> str:
     return ''
 
 def _find_game_folder_by_appid(app_id: str, steam_paths: list) -> str:
-    """Find game folder by app ID via manifest files."""
     if not app_id:
         return ''
     
     for common in steam_paths:
-        lib = os.path.dirname(common)  # steamapps folder
+        lib = os.path.dirname(common)
         try:
             for f in os.listdir(lib):
                 if f.startswith('appmanifest_') and f.endswith('.acf'):
@@ -688,7 +582,6 @@ def _find_game_folder_by_appid(app_id: str, steam_paths: list) -> str:
                         with open(manifest_path, 'r', encoding='utf-8', errors='ignore') as mf:
                             content = mf.read()
                             if f'"appid"\t\t"{app_id}"' in content or f'"appid"		"{app_id}"' in content:
-                                # Extract installdir
                                 match = re.search(r'"installdir"\s+"([^"]+)"', content)
                                 if match:
                                     install_dir = match.group(1)
@@ -703,15 +596,12 @@ def _find_game_folder_by_appid(app_id: str, steam_paths: list) -> str:
     return ''
 
 def _detect_archiver() -> tuple:
-    """Detect available archiver (WinRAR or 7-Zip)."""
     import shutil as sh
     
-    # Check WinRAR
     for p in [sh.which("winrar"), r"C:\Program Files\WinRAR\winrar.exe", r"C:\Program Files (x86)\WinRAR\winrar.exe"]:
         if p and os.path.exists(p):
             return ("winrar", p)
     
-    # Check 7-Zip
     for p in [sh.which("7z"), r"C:\Program Files\7-Zip\7z.exe", r"C:\Program Files (x86)\7-Zip\7z.exe"]:
         if p and os.path.exists(p):
             return ("7z", p)
@@ -719,7 +609,6 @@ def _detect_archiver() -> tuple:
     return (None, None)
 
 def _extract_archive(archive: str, target: str, atype: str, apath: str, pwd: str = "online-fix.me") -> bool:
-    """Extract archive using WinRAR or 7-Zip."""
     if atype == "winrar":
         cmd = [apath, "x", f"-p{pwd}", "-y", archive, target + os.sep]
     else:
@@ -737,17 +626,13 @@ def _extract_archive(archive: str, target: str, atype: str, apath: str, pwd: str
         return False
 
 def _list_archive_contents(archive: str, atype: str, apath: str, pwd: str = "online-fix.me") -> list:
-    """List the contents of an archive without extracting. Returns list of relative file paths."""
     files = []
     logger.log(f'Multiplayer: Listing archive contents: {archive}')
     try:
         if atype == "winrar":
-            # WinRAR GUI (winrar.exe) doesn't support list commands well
-            # Return empty to trigger directory scanning fallback
             logger.log(f'Multiplayer: WinRAR detected - using directory scan instead of archive listing')
             return []
         else:
-            # 7-Zip: l = list, -slt = show technical info
             cmd = [apath, "l", f"-p{pwd}", "-slt", archive]
         
         startupinfo = subprocess.STARTUPINFO()
@@ -761,11 +646,10 @@ def _list_archive_contents(archive: str, atype: str, apath: str, pwd: str = "onl
         
         logger.log(f'Multiplayer: Archive list command completed (exit code: {result.returncode})')
         
-        # 7-Zip -slt output has "Path = filename" lines
         for line in result.stdout.splitlines():
             line = line.strip()
             if line.startswith('Path = '):
-                path = line[7:]  # Remove "Path = " prefix
+                path = line[7:]
                 if path and not path.endswith('\\') and not path.endswith('/'):
                     files.append(path)
         
@@ -778,10 +662,6 @@ def _list_archive_contents(archive: str, atype: str, apath: str, pwd: str = "onl
     return files
 
 def _scan_directory_files(directory: str) -> dict:
-    """
-    Scan a directory recursively and return dict of relative_path -> (mtime, size).
-    Used for detecting changes before/after extraction.
-    """
     files = {}
     try:
         for root, dirs, filenames in os.walk(directory):
@@ -798,16 +678,10 @@ def _scan_directory_files(directory: str) -> dict:
     return files
 
 def _compare_directory_scans(before: dict, after: dict) -> tuple:
-    """
-    Compare two directory scans to find added and modified files.
-    Returns (added_files, modified_files) as lists of relative paths.
-    Excludes .bak files from the results.
-    """
     added = []
     modified = []
     
     for rel_path, (mtime, size) in after.items():
-        # Skip .bak files - these are our backups, not from the archive
         if rel_path.endswith('.bak'):
             continue
         if rel_path not in before:
@@ -820,10 +694,6 @@ def _compare_directory_scans(before: dict, after: dict) -> tuple:
     return (added, modified)
 
 def _run_extraction_with_timeout(cmd: list, timeout: int = 300) -> tuple:
-    """
-    Run extraction command with timeout and progress monitoring.
-    Returns (success, stdout, stderr, error_message)
-    """
     try:
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -832,7 +702,6 @@ def _run_extraction_with_timeout(cmd: list, timeout: int = 300) -> tuple:
         logger.log(f'Multiplayer: Starting extraction process...')
         start_time = time.time()
         
-        # Use Popen for better control
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -841,7 +710,6 @@ def _run_extraction_with_timeout(cmd: list, timeout: int = 300) -> tuple:
             creationflags=subprocess.CREATE_NO_WINDOW
         )
         
-        # Monitor the process with periodic logging
         while True:
             try:
                 stdout, stderr = process.communicate(timeout=10)
@@ -870,13 +738,6 @@ def _run_extraction_with_timeout(cmd: list, timeout: int = 300) -> tuple:
 
 def _extract_archive_with_backup(archive: str, target: str, atype: str, apath: str, 
                                   appid: int, game_name: str, pwd: str = "online-fix.me") -> tuple:
-    """
-    Extract archive to target directory with backup of existing files.
-    
-    Returns tuple of (success, added_files, backed_up_files)
-    - added_files: list of relative paths of files added
-    - backed_up_files: list of dicts with 'original' and 'backup' absolute paths
-    """
     added_files = []
     backed_up_files = []
     use_directory_scan = False
@@ -884,7 +745,6 @@ def _extract_archive_with_backup(archive: str, target: str, atype: str, apath: s
     try:
         _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': 'Analyzing archive contents...'})
         
-        # First, try to list all files in the archive
         archive_files = _list_archive_contents(archive, atype, apath, pwd)
         
         if not archive_files:
@@ -893,32 +753,25 @@ def _extract_archive_with_backup(archive: str, target: str, atype: str, apath: s
             use_directory_scan = True
         else:
             logger.log(f'Multiplayer: Archive contains {len(archive_files)} files for {game_name} ({appid})')
-            # Log each file that will be extracted
             for f in archive_files:
                 logger.log(f'Multiplayer: Archive file: {f}')
         
-        # If using directory scan, capture before state AND backup existing files
         dir_before = {}
         if use_directory_scan:
             logger.log(f'Multiplayer: Scanning directory before extraction: {target}')
             dir_before = _scan_directory_files(target)
             logger.log(f'Multiplayer: Found {len(dir_before)} existing files in game directory')
             
-            # Back up ALL existing files before extraction (we don't know which will be replaced)
-            # We'll clean up unnecessary backups after extraction
             _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': f'Backing up {len(dir_before)} existing files...'})
             
             for rel_path in dir_before.keys():
                 full_path = os.path.join(target, rel_path)
                 backup_path = full_path + '.bak'
                 try:
-                    # Skip if it's already a .bak file
                     if rel_path.endswith('.bak'):
                         continue
-                    # If backup already exists, skip (might be from previous attempt)
                     if os.path.exists(backup_path):
                         continue
-                    # Copy the file to .bak (don't rename - we need original for extraction to overwrite)
                     shutil.copy2(full_path, backup_path)
                     logger.log(f'Multiplayer: Pre-backed up {rel_path}')
                 except Exception as e:
@@ -928,10 +781,8 @@ def _extract_archive_with_backup(archive: str, target: str, atype: str, apath: s
         else:
             _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': f'Preparing {len(archive_files)} files...'})
             
-            # Check which files already exist and need backup (only if we have archive list)
             files_to_backup = []
             for rel_path in archive_files:
-                # Normalize path separators
                 rel_path_norm = rel_path.replace('/', os.sep).replace('\\', os.sep)
                 full_path = os.path.join(target, rel_path_norm)
                 
@@ -939,14 +790,12 @@ def _extract_archive_with_backup(archive: str, target: str, atype: str, apath: s
                     files_to_backup.append((rel_path_norm, full_path))
                     logger.log(f'Multiplayer: File exists, will backup: {full_path}')
             
-            # Backup existing files (rename to .bak)
             if files_to_backup:
                 _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': f'Backing up {len(files_to_backup)} existing files...'})
             
             for rel_path, full_path in files_to_backup:
                 backup_path = full_path + '.bak'
                 try:
-                    # If backup already exists, remove it first
                     if os.path.exists(backup_path):
                         os.remove(backup_path)
                     os.rename(full_path, backup_path)
@@ -961,7 +810,6 @@ def _extract_archive_with_backup(archive: str, target: str, atype: str, apath: s
         
         _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': 'Extracting files to game folder...'})
         
-        # Now extract the archive using the new method with progress monitoring
         if atype == "winrar":
             cmd = [apath, "x", f"-p{pwd}", "-y", archive, target + os.sep]
         else:
@@ -975,20 +823,16 @@ def _extract_archive_with_backup(archive: str, target: str, atype: str, apath: s
         _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': 'Verifying extracted files...'})
         
         if use_directory_scan:
-            # Compare directory before and after to find added/modified files
             logger.log(f'Multiplayer: Scanning directory after extraction...')
             dir_after = _scan_directory_files(target)
             new_files, modified_files = _compare_directory_scans(dir_before, dir_after)
             
             logger.log(f'Multiplayer: Directory scan found {len(new_files)} new files, {len(modified_files)} modified files')
             
-            # New files are definitely from the archive - these will be deleted on removal
             for rel_path in new_files:
                 added_files.append(rel_path)
                 logger.log(f'Multiplayer: Added file (detected): {rel_path}')
             
-            # Modified files - these were replaced, we have pre-created backups
-            # These should NOT be in added_files - they will be restored from backup, not deleted
             for rel_path in modified_files:
                 logger.log(f'Multiplayer: Modified file (detected): {rel_path}')
                 full_path = os.path.join(target, rel_path)
@@ -1001,17 +845,14 @@ def _extract_archive_with_backup(archive: str, target: str, atype: str, apath: s
                     })
                     logger.log(f'Multiplayer: Backup exists for modified file: {backup_path}')
                 else:
-                    # No backup exists - shouldn't happen but add to added_files so it gets removed
                     logger.warn(f'Multiplayer: No backup found for modified file: {rel_path}')
                     added_files.append(rel_path)
             
-            # Clean up unnecessary backups (files that weren't modified)
             _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': 'Cleaning up unnecessary backups...'})
             cleaned_count = 0
             for rel_path in dir_before.keys():
                 if rel_path.endswith('.bak'):
                     continue
-                # If file wasn't modified, remove the backup we created
                 if rel_path not in modified_files:
                     backup_path = os.path.join(target, rel_path) + '.bak'
                     try:
@@ -1023,7 +864,6 @@ def _extract_archive_with_backup(archive: str, target: str, atype: str, apath: s
             if cleaned_count > 0:
                 logger.log(f'Multiplayer: Cleaned up {cleaned_count} unnecessary backup files')
         else:
-            # Record all added files from the archive list
             for rel_path in archive_files:
                 rel_path_norm = rel_path.replace('/', os.sep).replace('\\', os.sep)
                 full_path = os.path.join(target, rel_path_norm)
@@ -1031,7 +871,6 @@ def _extract_archive_with_backup(archive: str, target: str, atype: str, apath: s
                     added_files.append(rel_path_norm)
                     logger.log(f'Multiplayer: Added file: {full_path}')
         
-        # Log the fix
         _log_multiplayer_fix(appid, game_name, target, added_files, backed_up_files)
         
         logger.log(f'Multiplayer: Extraction complete for {game_name} ({appid}) - {len(added_files)} files added, {len(backed_up_files)} files backed up')
@@ -1041,7 +880,6 @@ def _extract_archive_with_backup(archive: str, target: str, atype: str, apath: s
         logger.error(f'Multiplayer: Extraction with backup failed for {appid}: {e}')
         _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': f'Extraction error: {str(e)[:50]}'})
         
-        # Try to restore backed up files on failure
         for backup_info in backed_up_files:
             try:
                 if os.path.exists(backup_info['backup']):
@@ -1055,11 +893,6 @@ def _extract_archive_with_backup(archive: str, target: str, atype: str, apath: s
         return (False, [], [])
 
 def _remove_multiplayer_fix_files(appid: int) -> tuple:
-    """
-    Remove a multiplayer fix by deleting added files and restoring backups.
-    
-    Returns tuple of (success, message)
-    """
     try:
         fix_info = _get_multiplayer_fix_info(appid)
         if not fix_info:
@@ -1079,7 +912,6 @@ def _remove_multiplayer_fix_files(appid: int) -> tuple:
         restored_count = 0
         errors = []
         
-        # Remove added files
         for rel_path in added_files:
             full_path = os.path.join(game_folder, rel_path)
             try:
@@ -1091,16 +923,13 @@ def _remove_multiplayer_fix_files(appid: int) -> tuple:
                 errors.append(f'Failed to remove {rel_path}: {e}')
                 logger.warn(f'Multiplayer: Failed to remove {full_path}: {e}')
         
-        # Restore backed up files
         for backup_info in backed_up_files:
             original = backup_info.get('original', '')
             backup = backup_info.get('backup', '')
             try:
                 if backup and os.path.exists(backup):
-                    # Remove the new file if it still exists
                     if os.path.exists(original):
                         os.remove(original)
-                    # Restore the backup
                     os.rename(backup, original)
                     restored_count += 1
                     logger.log(f'Multiplayer: Restored backup: {backup} -> {original}')
@@ -1108,11 +937,10 @@ def _remove_multiplayer_fix_files(appid: int) -> tuple:
                 errors.append(f'Failed to restore backup: {e}')
                 logger.warn(f'Multiplayer: Failed to restore {backup}: {e}')
         
-        # Remove the log entry
         _remove_multiplayer_fix_log_entry(appid)
         
         if errors:
-            error_str = '; '.join(errors[:3])  # Limit error messages
+            error_str = '; '.join(errors[:3])
             return (True, f'Fix removed with {len(errors)} errors: {error_str}')
         
         logger.log(f'Multiplayer: Fix removed for {game_name} ({appid}) - {removed_count} files removed, {restored_count} backups restored')
@@ -1123,13 +951,6 @@ def _remove_multiplayer_fix_files(appid: int) -> tuple:
         return (False, str(e))
 
 def _wait_for_download(folder: str, max_wait: int = 600, appid: int = None) -> str:
-    """
-    Wait for download to complete in folder.
-    
-    - If no file appears within 5 seconds, abort with AV blocking error
-    - If file exists but size doesn't change, warn about slow connection
-    - Returns empty string and sets 'failed' status on error
-    """
     start = time.time()
     exts = (".rar", ".zip", ".7z")
     sizes = {}
@@ -1158,7 +979,7 @@ def _wait_for_download(folder: str, max_wait: int = 600, appid: int = None) -> s
                         
                         if f in sizes and sizes[f] == size:
                             stable[f] = stable.get(f, 0) + 1
-                            if stable[f] >= 3:  # Stable for 3+ seconds (file complete)
+                            if stable[f] >= 3:
                                 if appid:
                                     _set_multiplayer_fix_state(appid, {
                                         'status': 'downloading',
@@ -1169,7 +990,6 @@ def _wait_for_download(folder: str, max_wait: int = 600, appid: int = None) -> s
                             stable[f] = 0
                         sizes[f] = size
                         
-                        # Update progress message
                         if appid and size > 0:
                             size_mb = size / (1024 * 1024)
                             _set_multiplayer_fix_state(appid, {
@@ -1179,7 +999,6 @@ def _wait_for_download(folder: str, max_wait: int = 600, appid: int = None) -> s
                     except Exception:
                         pass
             
-            # Track size changes
             if current_total_size > last_total_size:
                 last_size_change_time = time.time()
                 last_total_size = current_total_size
@@ -1188,7 +1007,6 @@ def _wait_for_download(folder: str, max_wait: int = 600, appid: int = None) -> s
             elapsed = time.time() - start
             time_since_change = time.time() - last_size_change_time
             
-            # No file after 5 seconds = AV blocking
             if not file_found and elapsed >= 5:
                 logger.error(f'Multiplayer: No download file after {elapsed:.0f}s - antivirus likely blocking')
                 if appid:
@@ -1198,7 +1016,6 @@ def _wait_for_download(folder: str, max_wait: int = 600, appid: int = None) -> s
                     })
                 return ''
             
-            # File exists but no size change for 10+ seconds = slow connection
             if found_any_file and time_since_change >= 10 and not slow_warning_shown:
                 slow_warning_shown = True
                 if appid:
@@ -1207,7 +1024,6 @@ def _wait_for_download(folder: str, max_wait: int = 600, appid: int = None) -> s
                         'message': 'Download slow - check your internet connection...'
                     })
             
-            # File exists but no size change for 30+ seconds = stalled, abort
             if found_any_file and time_since_change >= 30:
                 logger.error(f'Multiplayer: Download stalled for {time_since_change:.0f}s')
                 if appid:
@@ -1220,9 +1036,8 @@ def _wait_for_download(folder: str, max_wait: int = 600, appid: int = None) -> s
         except Exception as e:
             logger.warn(f'Multiplayer: Error checking download folder: {e}')
         
-        time.sleep(1)  # Check every 1 second for faster response
+        time.sleep(1)
     
-    # Timeout reached
     if appid:
         _set_multiplayer_fix_state(appid, {
             'status': 'failed',
@@ -1232,7 +1047,6 @@ def _wait_for_download(folder: str, max_wait: int = 600, appid: int = None) -> s
     return ''
 
 def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, password: str) -> None:
-    """Run the multiplayer fix download and extraction process."""
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
@@ -1248,13 +1062,11 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
         return
     
     driver = None
-    # Use %APPDATA%/mangoplugin for downloads instead of temp
     appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
     temp_parent = os.path.join(appdata, "mangoplugin")
     temp = os.path.join(temp_parent, "dl")
     os.makedirs(temp, exist_ok=True)
     
-    # Clean download folder before starting
     for f in os.listdir(temp):
         try:
             os.remove(os.path.join(temp, f))
@@ -1338,7 +1150,6 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
         driver.execute_script("arguments[0].scrollIntoView(true);", best)
         driver.execute_script("arguments[0].click();", best)
         
-        # Wait for page to load and check if game is no longer supported
         time.sleep(2)
         try:
             page_source = driver.page_source or ""
@@ -1373,8 +1184,6 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
         _set_multiplayer_fix_state(appid, {'status': 'finding_download', 'message': 'Finding download link...'})
         
         download_xpath = "//a[contains(text(),'Скачать фикс с сервера')] | //button[contains(text(),'Скачать фикс с сервера')]"
-        # Use a shorter 10-second timeout for finding download link after login
-        # If login failed, this will timeout quickly and show login_required
         short_wait = WebDriverWait(driver, 10)
         try:
             short_wait.until(EC.presence_of_element_located((By.XPATH, download_xpath)))
@@ -1395,19 +1204,16 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
         driver.execute_script("arguments[0].scrollIntoView(true);", dl_btn)
         driver.execute_script("arguments[0].click();", dl_btn)
         
-        # Wait for new tab
         try:
             wait.until(lambda d: len(d.window_handles) > 1)
         except TimeoutException:
             pass
         
-        # Switch to uploads tab if opened
         for h in driver.window_handles:
             driver.switch_to.window(h)
             if "uploads.online-fix.me" in driver.current_url.lower():
                 break
         
-        # Check if download page shows 401 Authorization Required (game no longer supported)
         time.sleep(1)
         try:
             page_source = driver.page_source or ""
@@ -1419,7 +1225,6 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
         except Exception as e:
             logger.warn(f'Multiplayer: Error checking download page: {e}')
         
-        # Look for Fix Repair link
         try:
             wait.until(EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, "Fix Repair")))
         except TimeoutException:
@@ -1432,7 +1237,6 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
                 driver.execute_script("arguments[0].click();", fix_links[0])
                 time.sleep(2)
                 
-                # Check for 401 after clicking Fix Repair link
                 try:
                     page_source = driver.page_source or ""
                     page_title = driver.title or ""
@@ -1445,7 +1249,6 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
             except Exception:
                 pass
             
-            # Find and click actual download link
             all_links = driver.find_elements(By.TAG_NAME, "a")
             for lnk in all_links:
                 href = lnk.get_attribute("href") or ""
@@ -1456,7 +1259,6 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
                     except Exception:
                         pass
         else:
-            # No Fix Repair link found - check if the page itself shows 401
             try:
                 page_source = driver.page_source or ""
                 page_title = driver.title or ""
@@ -1471,8 +1273,6 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
         dl = _wait_for_download(temp, max_wait=600, appid=appid)
         
         if not dl:
-            # Error message already set by _wait_for_download if appid provided
-            # Only set generic error if not already set
             state = _get_multiplayer_fix_state(appid)
             if state.get('status') != 'failed':
                 _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'Download timeout - check antivirus or connection'})
@@ -1480,7 +1280,6 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
         
         _set_multiplayer_fix_state(appid, {'status': 'extracting', 'message': 'Extracting fix...'})
         
-        # Find game folder
         steam_paths = _find_steam_game_folders()
         if not steam_paths:
             _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'No Steam library found'})
@@ -1499,13 +1298,11 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
             _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'No archiver found (need WinRAR or 7-Zip)'})
             return
         
-        # Use the new extraction with backup function
         success, added_files, backed_up_files = _extract_archive_with_backup(dl, gf, atype, apath, appid, game_name)
         if not success:
             _set_multiplayer_fix_state(appid, {'status': 'failed', 'error': 'Extraction failed'})
             return
         
-        # Cleanup
         try:
             os.remove(dl)
         except Exception:
@@ -1527,7 +1324,6 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
                 driver.quit()
             except Exception:
                 pass
-        # Always cleanup the contents inside mangoplugin folder (keep folder for AV exclusion)
         try:
             appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
             mango_folder = os.path.join(appdata, "mangoplugin")
@@ -1545,10 +1341,7 @@ def _run_multiplayer_fix_process(appid: int, game_name: str, username: str, pass
         except Exception as cleanup_err:
             logger.warn(f'Multiplayer: Failed to cleanup mangoplugin folder: {cleanup_err}')
 
-# ===== Multiplayer Fix Frontend API Functions =====
-
 def CheckGameHasMultiplayer(appid: int, contentScriptQuery: str = '') -> str:
-    """Check if a game has multiplayer (called from frontend)."""
     try:
         appid = int(appid)
     except Exception:
@@ -1558,7 +1351,6 @@ def CheckGameHasMultiplayer(appid: int, contentScriptQuery: str = '') -> str:
     return json.dumps({'success': True, 'has_multiplayer': has_mp})
 
 def GetMultiplayerCredentials(contentScriptQuery: str = '') -> str:
-    """Get multiplayer credentials (without password)."""
     config = _get_multiplayer_config()
     has_creds = bool(config.get('username')) and bool(config.get('password'))
     return json.dumps({
@@ -1568,7 +1360,6 @@ def GetMultiplayerCredentials(contentScriptQuery: str = '') -> str:
     })
 
 def SaveMultiplayerCredentials(username: str, password: str, contentScriptQuery: str = '') -> str:
-    """Save multiplayer credentials."""
     try:
         username = str(username or '').strip()
         password = str(password or '').strip()
@@ -1589,13 +1380,11 @@ def SaveMultiplayerCredentials(username: str, password: str, contentScriptQuery:
         return json.dumps({'success': False, 'error': str(e)})
 
 def StartMultiplayerFix(appid: int, contentScriptQuery: str = '') -> str:
-    """Start the multiplayer fix process for a game."""
     try:
         appid = int(appid)
     except Exception:
         return json.dumps({'success': False, 'error': 'Invalid appid'})
     
-    # Get credentials
     config = _get_multiplayer_config()
     username = config.get('username', '')
     password = config.get('password', '')
@@ -1603,10 +1392,8 @@ def StartMultiplayerFix(appid: int, contentScriptQuery: str = '') -> str:
     if not username or not password:
         return json.dumps({'success': False, 'error': 'No credentials configured', 'need_credentials': True})
     
-    # Get game name
     game_name = _fetch_app_name(appid) or f'Game {appid}'
     
-    # Start fix in background thread
     _set_multiplayer_fix_state(appid, {'status': 'queued', 'message': 'Starting...'})
     
     t = threading.Thread(
@@ -1620,7 +1407,6 @@ def StartMultiplayerFix(appid: int, contentScriptQuery: str = '') -> str:
     return json.dumps({'success': True, 'game_name': game_name})
 
 def GetMultiplayerFixStatus(appid: int, contentScriptQuery: str = '') -> str:
-    """Get the current status of a multiplayer fix operation."""
     try:
         appid = int(appid)
     except Exception:
@@ -1630,7 +1416,6 @@ def GetMultiplayerFixStatus(appid: int, contentScriptQuery: str = '') -> str:
     return json.dumps({'success': True, 'state': state})
 
 def IsMultiplayerFixApplied(appid: int, contentScriptQuery: str = '') -> str:
-    """Check if a multiplayer fix has been applied to a game."""
     try:
         appid = int(appid)
     except Exception:
@@ -1649,7 +1434,6 @@ def IsMultiplayerFixApplied(appid: int, contentScriptQuery: str = '') -> str:
     })
 
 def RemoveMultiplayerFix(appid: int, contentScriptQuery: str = '') -> str:
-    """Remove a previously applied multiplayer fix."""
     try:
         appid = int(appid)
     except Exception:
@@ -1668,7 +1452,6 @@ def RemoveMultiplayerFix(appid: int, contentScriptQuery: str = '') -> str:
     })
 
 def GetMultiplayerFixInfo(appid: int, contentScriptQuery: str = '') -> str:
-    """Get detailed info about an applied multiplayer fix."""
     try:
         appid = int(appid)
     except Exception:
@@ -1689,9 +1472,6 @@ def GetMultiplayerFixInfo(appid: int, contentScriptQuery: str = '') -> str:
             'backed_up_files': fix_info.get('backed_up_files', [])
         }
     })
-
-# ==================== END MULTIPLAYER FIX FUNCTIONS ====================
-                                                    
 
 def detect_steam_install_path() -> str:
     
@@ -1802,7 +1582,6 @@ class Plugin:
             logger.warn(f'MangoUnlock: steam path detection failed: {e}')
         self.init_http_client()
         
-        # Apply any pending updates from previous session
         try:
             message = _apply_pending_update_if_any()
             if message:
@@ -1813,7 +1592,6 @@ class Plugin:
         self.copy_webkit_files()
         self.inject_webkit_files()
         
-        # Start auto-update background check
         try:
             _start_auto_update_background_check()
         except Exception as exc:
@@ -1843,7 +1621,6 @@ def _ensure_http_client() -> None:
 
 
 def _get_dlc_cache_entry(appid: int):
-    """Get cached DLC list for an app if not expired."""
     now = time.time()
     with DLC_CACHE_LOCK:
         entry = DLC_CACHE.get(appid)
@@ -1856,7 +1633,6 @@ def _get_dlc_cache_entry(appid: int):
 
 
 def _set_dlc_cache_entry(appid: int, dlcs: list) -> None:
-    """Cache DLC list for an app."""
     with DLC_CACHE_LOCK:
         DLC_CACHE[appid] = {
             'timestamp': time.time(),
@@ -1865,11 +1641,6 @@ def _set_dlc_cache_entry(appid: int, dlcs: list) -> None:
 
 
 def _fetch_dlcs_for_app(appid: int) -> list:
-    """
-    Fetch all DLC app IDs for a given app from Steam Store API.
-    Returns a list of DLC app IDs (integers).
-    """
-    # Check cache first
     cached = _get_dlc_cache_entry(appid)
     if cached is not None:
         logger.log(f'MangoUnlock: DLC cache hit for appid {appid}, {len(cached)} DLCs')
@@ -1892,7 +1663,6 @@ def _fetch_dlcs_for_app(appid: int) -> list:
         if not isinstance(dlc_list, list):
             dlc_list = []
         
-        # Convert to integers
         dlc_appids = []
         for dlc_id in dlc_list:
             try:
@@ -1909,13 +1679,6 @@ def _fetch_dlcs_for_app(appid: int) -> list:
 
 
 def _extract_existing_appids_from_lua(lua_text: str) -> set:
-    """
-    Extract all app IDs that are already present in the lua file.
-    Searches for lines starting with addappid(APPID to handle both:
-    - addappid(123)
-    - addappid(123,0,"key")
-    Returns a set of app ID integers.
-    """
     existing = set()
     for line in lua_text.splitlines():
         match = ADDAPP_APPID_EXTRACT.search(line)
@@ -1928,12 +1691,6 @@ def _extract_existing_appids_from_lua(lua_text: str) -> set:
 
 
 def _inject_missing_dlcs_into_lua(lua_text: str, dlc_appids: list) -> str:
-    """
-    Inject missing DLC app IDs into the lua content.
-    Checks each DLC app ID - if not already present as addappid(DLCID...,
-    appends addappid(DLCID) at the end.
-    Returns the modified lua text.
-    """
     if not dlc_appids:
         return lua_text
     
@@ -1946,10 +1703,8 @@ def _inject_missing_dlcs_into_lua(lua_text: str, dlc_appids: list) -> str:
     
     logger.log(f'MangoUnlock: Injecting {len(missing)} missing DLCs out of {len(dlc_appids)} total')
     
-    # Ensure the lua text ends with a newline before appending
     result = lua_text.rstrip('\n') + '\n'
     
-    # Add missing DLCs
     for dlc_id in missing:
         result += f'addappid({dlc_id})\n'
     
@@ -1957,10 +1712,6 @@ def _inject_missing_dlcs_into_lua(lua_text: str, dlc_appids: list) -> str:
 
 
 def PrefetchDLCsForApp(appid: int, contentScriptQuery: str = '') -> str:
-    """
-    Called from frontend to pre-fetch DLCs for an app.
-    This starts a background fetch so DLCs are ready when download is requested.
-    """
     try:
         appid = int(appid)
     except Exception:
@@ -2009,183 +1760,45 @@ def _set_manifest_cache_entry(appid: str, available: bool, repository: str = Non
             'repository': repository,
         }
 
-def _normalize_api_entry(entry: dict):
-    
-    try:
-        if not isinstance(entry, dict):
-            return None
-        url = str(entry.get('url', '')).strip()
-        if not url:
-            return None
-        name = str(entry.get('name', 'Remote')).strip() or 'Remote'
-        success_code = int(entry.get('success_code', 200))
-        unavailable_code = int(entry.get('unavailable_code', 404))
-        enabled = bool(entry.get('enabled', True))
-        return {
-            'name': name,
-            'url': url,
-            'success_code': success_code,
-            'unavailable_code': unavailable_code,
-            'enabled': enabled,
-        }
-    except Exception:
-        return None
+def _get_ryuu_api_url(appid: int) -> str:
+    return RYUU_API_URL.replace('{appid}', str(appid))
 
-
-def _normalize_manifest_text(text: str) -> str:
-    content = (text or '').strip()
-    if not content:
-        return content
-
-    content = re.sub(r",\s*]", "]", content)
-    content = re.sub(r",\s*}\s*$", "}", content)
-
-    if content.startswith('"api_list"') or content.startswith("'api_list'") or content.startswith("api_list"):
-        if not content.startswith("{"):
-            content = "{" + content
-        if not content.endswith("}"):
-            content = content.rstrip(",") + "}"
-
-    try:
-        json.loads(content)
-        return content
-    except Exception:
-        return text
-
-
-def _parse_remote_payload(text: str):
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
-
-    candidate = (text or '').strip().rstrip(",")
-    if candidate.lstrip().startswith('"api_list"'):
-        wrapped = "{" + candidate + "}"
-        try:
-            return json.loads(wrapped)
-        except Exception:
-            candidate = wrapped
-
-    match = re.search(r'"api_list"\s*:\s*(\[[\s\S]*\])', candidate)
-    if match:
-        array_part = match.group(1)
-        try:
-            return {"api_list": json.loads(array_part)}
-        except Exception:
-            try:
-                return json.loads(f'{{"api_list": {array_part}}}')
-            except Exception:
-                return None
-    return None
-
-def _load_remote_api_list() -> list:
-    
-    now = time.time()
-    with REMOTE_API_LIST_LOCK:
-        cached = REMOTE_API_LIST_CACHE.get('entries')
-        cached_ts = REMOTE_API_LIST_CACHE.get('timestamp', 0.0)
-    if cached and (now - cached_ts) < REMOTE_API_LIST_TTL:
-        return cached
-
-    cached = cached or []
-    manifest_text = ''
-
-    api_json_path = _backend_path('api.json')
-    if os.path.exists(api_json_path):
-        try:
-            with open(api_json_path, 'r', encoding='utf-8') as f:
-                manifest_text = f.read()
-            logger.log(f'MangoUnlock: Loaded API manifest from local file {api_json_path}')
-        except Exception as e:
-            logger.warn(f'MangoUnlock: Failed to read local API manifest {api_json_path}: {e}')
-
-    if not manifest_text:
-        _ensure_http_client()
-        try:
-            resp = HTTP_CLIENT.get(API_MANIFEST_URL, timeout=HTTP_TIMEOUT_SECONDS)
-            resp.raise_for_status()
-            manifest_text = resp.text
-            logger.log(f'MangoUnlock: Remote API manifest fetched (status {resp.status_code}, bytes {len(resp.content)})')
-        except Exception as primary_error:
-            logger.warn(f'MangoUnlock: Remote API manifest primary fetch failed: {primary_error}; trying proxy')
-            try:
-                resp = HTTP_CLIENT.get(API_MANIFEST_PROXY_URL, timeout=HTTP_TIMEOUT_SECONDS)
-                resp.raise_for_status()
-                manifest_text = resp.text
-                logger.log(f'MangoUnlock: Remote API manifest fetched from proxy (status {resp.status_code}, bytes {len(resp.content)})')
-            except Exception as proxy_error:
-                if cached:
-                    logger.warn(f'MangoUnlock: Remote API manifest fetch failed; using cached entries (primary={primary_error}; proxy={proxy_error})')
-                    return cached
-                logger.warn(f'MangoUnlock: Remote API manifest fetch failed (primary={primary_error}; proxy={proxy_error})')
-                return []
-
-    normalized_text = _normalize_manifest_text(manifest_text)
-    if not normalized_text:
-        return cached
-
-    try:
-        payload = json.loads(normalized_text)
-    except Exception:
-        payload = _parse_remote_payload(normalized_text)
-        if payload is None:
-            logger.warn('MangoUnlock: Remote API manifest parse failed after normalization')
-            return cached
-
-    entries = payload.get('api_list')
-    normalized_entries = []
-    if isinstance(entries, list):
-        for entry in entries:
-            normalized_entry = _normalize_api_entry(entry)
-            if normalized_entry and normalized_entry.get('enabled', True):
-                normalized_entries.append(normalized_entry)
-
-    if not normalized_entries:
-        return cached
-
-    with REMOTE_API_LIST_LOCK:
-        REMOTE_API_LIST_CACHE['entries'] = normalized_entries
-        REMOTE_API_LIST_CACHE['timestamp'] = time.time()
-    return normalized_entries
-
-def _get_api_sources() -> list:
-    
-    return _load_remote_api_list()
+def _get_ryuu_check_url(appid: int) -> str:
+    return RYUU_CHECK_URL.replace('{appid}', str(appid))
 
 def _check_api_availability(appid: int):
-    
-    api_sources = _get_api_sources()
-    if not api_sources:
-        return False, None
-
     _ensure_http_client()
-    base_headers = dict(API_DOWNLOAD_HEADERS)
-
-    for api in api_sources:
-        if not api.get('enabled', True):
-            continue
-
-        name = api.get('name', 'Unknown')
-        label = f'API:{name}'
-        template = api.get('url', '')
-        url = template.replace('<appid>', str(appid))
-        success_code = int(api.get('success_code', 200))
-        unavailable_code = int(api.get('unavailable_code', 404))
-
-        try:
-            with HTTP_CLIENT.stream('GET', url, headers=base_headers, timeout=HTTP_TIMEOUT_SECONDS) as resp:
-                status = resp.status_code
-                if status == success_code:
-                    logger.log(f'MangoUnlock: API source reports availability for appid {appid} ({label})')
+    url = _get_ryuu_check_url(appid)
+    label = 'API:Ryuu'
+    
+    try:
+        resp = HTTP_CLIENT.get(url, headers=PROXY_AUTH_HEADERS, follow_redirects=True, timeout=HTTP_TIMEOUT_SECONDS)
+        status = resp.status_code
+        if status == 200:
+            try:
+                data = resp.json()
+                if data.get('success') and data.get('available'):
+                    logger.log(f'MangoUnlock: Proxy reports availability for appid {appid}')
                     return True, label
-                if status == unavailable_code:
-                    continue
-                logger.log(f'MangoUnlock: API source {label} returned unexpected status {status} for appid {appid}')
-        except httpx.HTTPError as e:
-            logger.warn(f'MangoUnlock: API availability check HTTP error for appid {appid}: {e}')
-        except Exception as e:
-            logger.warn(f'MangoUnlock: API availability check failed for appid {appid}: {e}')
+                else:
+                    logger.log(f'MangoUnlock: Proxy reports appid {appid} unavailable')
+                    return False, None
+            except Exception:
+                # Fallback: if response is not JSON, assume available
+                logger.log(f'MangoUnlock: Proxy reports availability for appid {appid}')
+                return True, label
+        if status == 404:
+            logger.log(f'MangoUnlock: Proxy reports appid {appid} unavailable')
+            return False, None
+        logger.log(f'MangoUnlock: Proxy returned unexpected status {status} for appid {appid}')
+    except httpx.HTTPError as e:
+        logger.warn(f'MangoUnlock: Proxy availability check HTTP error for appid {appid}: {e}')
+    except Exception as e:
+        err_str = str(e)
+        if 'WRONG_VERSION_NUMBER' in err_str or 'SSL' in err_str:
+            logger.warn(f'MangoUnlock: Proxy blocked by ISP for appid {appid}. User should try VPN or change DNS.')
+            return False, 'ISP_BLOCKED'
+        logger.warn(f'MangoUnlock: Proxy availability check failed for appid {appid}: {e}')
 
     return False, None
 
@@ -2230,6 +1843,9 @@ def CheckManifestAvailability(appid: int, contentScriptQuery: str = '') -> str:
         logger.log(f'MangoUnlock: Manifest available for appid {appid} via API source')
         return json.dumps({ 'success': True, 'available': True, 'repository': api_label })
 
+    if api_label == 'ISP_BLOCKED':
+        return json.dumps({ 'success': True, 'available': False, 'isp_blocked': True })
+
     if errors:
         logger.warn(f'MangoUnlock: Manifest availability check failed for {appid}: {"; ".join(errors)}')
         return json.dumps({ 'success': False, 'error': 'Manifest lookup failed', 'details': errors })
@@ -2237,6 +1853,52 @@ def CheckManifestAvailability(appid: int, contentScriptQuery: str = '') -> str:
     _set_manifest_cache_entry(appid_str, False, None)
     logger.log(f'MangoUnlock: Manifest not available for appid {appid}')
     return json.dumps({ 'success': True, 'available': False })
+
+def RequestGame(appid: int, contentScriptQuery: str = '') -> str:
+    try:
+        appid = int(appid)
+    except Exception:
+        return json.dumps({ 'success': False, 'error': 'Invalid appid' })
+    
+    _ensure_http_client()
+    url = RYUU_REQUEST_URL.replace('{appid}', str(appid))
+    
+    try:
+        resp = HTTP_CLIENT.get(url, headers=PROXY_AUTH_HEADERS, timeout=HTTP_TIMEOUT_SECONDS)
+        response_text = resp.text.strip()
+        
+        display_message = 'Game Requested'
+        try:
+            proxy_data = json.loads(response_text)
+            if isinstance(proxy_data, dict):
+                # The proxy returns { "response": "{\"message\":\"...\"}" }
+                inner_response = proxy_data.get('response', '')
+                if isinstance(inner_response, str):
+                    try:
+                        inner_data = json.loads(inner_response)
+                        api_message = inner_data.get('message', '') if isinstance(inner_data, dict) else ''
+                    except Exception:
+                        api_message = inner_response
+                else:
+                    api_message = str(inner_response)
+                
+                if api_message:
+                    msg_lower = api_message.lower()
+                    if 'already' in msg_lower:
+                        display_message = 'Game Already Requested'
+        except Exception:
+            pass
+        
+        if resp.status_code == 200:
+            return json.dumps({ 'success': True, 'message': display_message })
+        else:
+            return json.dumps({ 'success': False, 'error': 'Request Failed' })
+    except httpx.HTTPError as e:
+        logger.warn(f'MangoUnlock: Game request HTTP error for appid {appid}')
+        return json.dumps({ 'success': False, 'error': 'Request Failed' })
+    except Exception as e:
+        logger.warn(f'MangoUnlock: Game request failed for appid {appid}')
+        return json.dumps({ 'success': False, 'error': 'Request Failed' })
 
 def _restart_steam_internal():
     
@@ -2422,124 +2084,78 @@ def _install_lua_content(appid: int, lua_text: str) -> str:
     return dest_file
 
 def _download_lua_via_api_sources(appid: int, dlc_future: dict = None) -> bool:
-    """
-    Download lua via API sources. If dlc_future is provided, it's a dict
-    with 'thread' and 'result' keys for async DLC fetching.
-    """
     _ensure_http_client()
-    sources = _get_api_sources()
-    if not sources:
-        logger.warn('MangoUnlock: No API sources available for download')
-        return False
+    url = _get_ryuu_api_url(appid)
+    label = 'API:Proxy'
 
-    headers = dict(API_DOWNLOAD_HEADERS)
-    dest_zip = _backend_path(f'{appid}.zip')
-    os.makedirs(_backend_dir(), exist_ok=True)
+    _set_download_state(appid, {
+        'status': 'checking',
+        'currentRepo': label,
+        'bytesRead': 0,
+        'totalBytes': 0,
+    })
+    logger.log(f'MangoUnlock: Attempting Proxy download for appid {appid}')
 
-    for index, api in enumerate(sources):
-        if not api.get('enabled', True):
-            continue
+    try:
+        resp = HTTP_CLIENT.get(url, headers=PROXY_AUTH_HEADERS, follow_redirects=True, timeout=HTTP_TIMEOUT_SECONDS)
+        if resp.status_code == 404:
+            logger.log(f'MangoUnlock: Proxy reports appid {appid} unavailable')
+            return False
+        if resp.status_code != 200:
+            logger.log(f'MangoUnlock: Proxy unexpected status {resp.status_code} for appid {appid}')
+            return False
 
-        name = api.get('name', 'Unknown')
-        label = f'API:{name}'
-        template = api.get('url', '')
-        url = template.replace('<appid>', str(appid))
-        success_code = int(api.get('success_code', 200))
-        unavailable_code = int(api.get('unavailable_code', 404))
+        lua_text = resp.text
+        _set_download_state(appid, {
+            'status': 'downloading',
+            'currentRepo': label,
+            'totalBytes': len(lua_text),
+            'bytesRead': len(lua_text),
+        })
+
+        processed = _strip_lua_to_addappid(lua_text)
+
+        if dlc_future:
+            try:
+                dlc_thread = dlc_future.get('thread')
+                if dlc_thread:
+                    dlc_thread.join(timeout=5)
+                dlc_list = dlc_future.get('result', [])
+                if dlc_list:
+                    processed = _inject_missing_dlcs_into_lua(processed, dlc_list)
+            except Exception as e:
+                logger.warn(f'MangoUnlock: DLC injection failed for appid {appid}: {e}')
+
+        _set_download_state(appid, { 'status': 'installing', 'currentRepo': label })
+        dest_file = _install_lua_content(appid, processed)
 
         try:
-            if os.path.exists(dest_zip):
-                os.remove(dest_zip)
+            fetched_name = _fetch_app_name(appid) or f'UNKNOWN ({appid})'
+            _append_loaded_app(appid, fetched_name)
+            _log_appid_event('ADDED', appid, fetched_name)
         except Exception:
             pass
 
         _set_download_state(appid, {
-            'status': 'checking',
-            'currentRepo': label,
-            'bytesRead': 0,
-            'totalBytes': 0,
+            'status': 'done',
+            'success': True,
+            'repository': label,
+            'installedPath': dest_file,
         })
-        logger.log(f'MangoUnlock: Attempting API download source #{index + 1} ({label}) for appid {appid}')
-
-        try:
-            with HTTP_CLIENT.stream('GET', url, headers=headers, timeout=HTTP_TIMEOUT_SECONDS) as resp:
-                status_code = resp.status_code
-                if status_code == unavailable_code:
-                    logger.log(f'MangoUnlock: API source {label} reports appid {appid} unavailable')
-                    continue
-                if status_code != success_code:
-                    logger.log(f'MangoUnlock: API source {label} unexpected status {status_code} for appid {appid}')
-                    continue
-
-                total = int(resp.headers.get('Content-Length') or '0')
-                bytes_read = 0
-                _set_download_state(appid, {
-                    'status': 'downloading',
-                    'currentRepo': label,
-                    'totalBytes': total,
-                    'bytesRead': 0,
-                })
-
-                with open(dest_zip, 'wb') as out_file:
-                    for chunk in resp.iter_bytes():
-                        if not chunk:
-                            continue
-                        out_file.write(chunk)
-                        bytes_read += len(chunk)
-                        _set_download_state(appid, { 'bytesRead': bytes_read })
-
-            if not _is_valid_zip_file(dest_zip):
-                logger.warn(f'MangoUnlock: API source returned non-zip content for appid {appid} ({label})')
-                try:
-                    with open(dest_zip, 'rb') as f:
-                        preview = f.read(80)
-                    logger.warn(f'MangoUnlock: API source preview for appid {appid}: {preview}')
-                except Exception:
-                    pass
-                continue
-
-            processed = _process_zip_keep_lua(dest_zip, appid)
-            
-            # Inject missing DLCs if DLC fetch completed
-            if dlc_future:
-                try:
-                    dlc_thread = dlc_future.get('thread')
-                    if dlc_thread:
-                        dlc_thread.join(timeout=5)  # Wait up to 5 seconds
-                    dlc_list = dlc_future.get('result', [])
-                    if dlc_list:
-                        processed = _inject_missing_dlcs_into_lua(processed, dlc_list)
-                except Exception as e:
-                    logger.warn(f'MangoUnlock: DLC injection failed for appid {appid}: {e}')
-            
-            _set_download_state(appid, { 'status': 'installing', 'currentRepo': label })
-            dest_file = _install_lua_content(appid, processed)
-
-            try:
-                fetched_name = _fetch_app_name(appid) or f'UNKNOWN ({appid})'
-                _append_loaded_app(appid, fetched_name)
-                _log_appid_event('ADDED', appid, fetched_name)
-            except Exception:
-                pass
-
+        logger.log(f'MangoUnlock: Lua installed for appid {appid} via Proxy')
+        return True
+    except httpx.HTTPError as e:
+        logger.warn(f'MangoUnlock: Proxy download HTTP error for appid {appid}: {e}')
+    except Exception as e:
+        err_str = str(e)
+        if 'WRONG_VERSION_NUMBER' in err_str or 'SSL' in err_str:
+            logger.warn(f'MangoUnlock: Proxy blocked by ISP for appid {appid}. User should try VPN or change DNS.')
             _set_download_state(appid, {
-                'status': 'done',
-                'success': True,
-                'repository': label,
-                'installedPath': dest_file,
+                'status': 'error',
+                'error': 'Connection blocked by ISP. Try using a VPN or changing your DNS.',
             })
-            logger.log(f'MangoUnlock: Lua installed for appid {appid} via API source ({label})')
-            return True
-        except httpx.HTTPError as e:
-            logger.warn(f'MangoUnlock: API download HTTP error for appid {appid} ({label}): {e}')
-        except Exception as e:
-            logger.warn(f'MangoUnlock: API download processing failed for appid {appid} ({label}): {e}')
-        finally:
-            try:
-                if os.path.exists(dest_zip):
-                    os.remove(dest_zip)
-            except Exception:
-                pass
+        else:
+            logger.warn(f'MangoUnlock: Proxy download processing failed for appid {appid}: {e}')
 
     return False
 
@@ -2554,15 +2170,10 @@ def _get_download_state(appid: int) -> dict:
         return DOWNLOAD_STATE.get(appid, {}).copy()
 
 def _download_lua_for_app(appid: int):
-    """
-    Download lua file for app and inject missing DLCs.
-    Starts DLC fetching in parallel with the download for efficiency.
-    """
     _ensure_http_client()
     appid_str = str(appid)
     _set_download_state(appid, { 'status': 'queued', 'bytesRead': 0, 'totalBytes': 0, 'currentRepo': None })
     
-    # Start DLC fetching in parallel - this runs while we search for/download the lua
     dlc_future = {'thread': None, 'result': []}
     def _fetch_dlcs_async():
         try:
@@ -2595,9 +2206,8 @@ def _download_lua_for_app(appid: int):
 
             processed = _strip_lua_to_addappid(lua_text)
             
-            # Wait for DLC fetch to complete and inject missing DLCs
             try:
-                dlc_thread.join(timeout=10)  # Wait up to 10 seconds for DLC fetch
+                dlc_thread.join(timeout=10)
                 dlc_list = dlc_future.get('result', [])
                 if dlc_list:
                     processed = _inject_missing_dlcs_into_lua(processed, dlc_list)
@@ -2621,7 +2231,6 @@ def _download_lua_for_app(appid: int):
             logger.warn(f'MangoUnlock: Repository download failed for appid {appid}: {e}')
             continue
 
-    # Pass DLC future to API sources download
     if _download_lua_via_api_sources(appid, dlc_future):
         return
 
@@ -2852,4 +2461,3 @@ def _find_steam_path() -> str:
             logger.warn(f'MangoUnlock: Failed to read Steam path from registry: {e}')
 
     return ''
-

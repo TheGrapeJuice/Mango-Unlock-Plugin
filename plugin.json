@@ -2,8 +2,8 @@
   "$schema": "https://raw.githubusercontent.com/SteamClientHomebrew/Millennium/main/src/sys/plugin-schema.json",
   "name": "mangounlock",
   "common_name": "MangoUnlock",
-  "description": "MangoUnlock Steam Plugin!",
-  "version": "2.0.4",
+  "description": "• Unlock games directly in Steam • Auto DLC unlocking • Request games • Multiplayer fixes • Auto-updates",
+  "version": "2.0.6",
   "include": [
     "public"
   ]
